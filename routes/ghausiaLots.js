@@ -3,16 +3,64 @@ const router = express.Router();
 const GhausiaLot = require('../models/GhausiaLot');
 const Party = require('../models/Party');
 const PartyLedger = require('../models/PartyLedger');
+const PartyEdit = require('../models/PartyEdit');
+const { getDataOwnerId, getScopedFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, escapeRegexString, isParty, requireAdminUser, isTenantAdmin, toObjectId } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
+const partyEditableLotFields = new Set(['status', 'dispatchDate', 'receivedBackDate']);
+
+const canonicalLotNumberFromDoc = (doc) =>
+  String(doc.lotNumber || doc.lotNo || '').trim();
+
+/** Same workspace = same BusinessOwner document (string/ObjectId tolerant). */
+const sameBusinessWorkspace = (storedOwnerId, requestedOwnerId) =>
+  String(storedOwnerId ?? '') === String(requestedOwnerId ?? '');
+
+/**
+ * Lot numbers must be unique within one business collection only.
+ * Query by userId + lot number then filter by businessOwnerId string match so
+ * ObjectId vs string storage does not falsely block another collection.
+ */
+const ensureLotNumberUniqueInCollection = async (userId, businessOwnerId, lotNumber, excludeId) => {
+  const trimmed = String(lotNumber || '').trim();
+  if (!trimmed) return;
+
+  const ownerReq = String(businessOwnerId || '').trim();
+  if (!ownerReq) {
+    const err = new Error('Select a business collection before saving lots.');
+    err.code = 'MISSING_BUSINESS_OWNER';
+    throw err;
+  }
+
+  const escaped = escapeRegexString(trimmed);
+  const regex = new RegExp(`^${escaped}$`, 'i');
+
+  const uid = toObjectId(userId);
+  const exclude = excludeId ? toObjectId(excludeId) : null;
+
+  const candidates = await GhausiaLot.find({
+    userId: uid,
+    $or: [{ lotNumber: regex }, { lotNo: regex }],
+    ...(exclude ? { _id: { $ne: exclude } } : {}),
+  })
+    .select('_id businessOwnerId lotNumber lotNo')
+    .lean();
+
+  const conflict = candidates.find((doc) => sameBusinessWorkspace(doc.businessOwnerId, ownerReq));
+  if (!conflict) return;
+
+  const err = new Error(`Lot number "${trimmed}" already exists in this collection. Use a different number, or switch to another business if this is intentional.`);
+  err.code = 'DUPLICATE_LOT_NUMBER';
+  throw err;
+};
 
 const normalizeStatus = (status) => {
   if (!status) return 'pending';
   const normalized = String(status).trim().toLowerCase();
   if (normalized === 'receivedback') return 'received back';
   if (normalized === 'inprogress') return 'in progress';
-  if (['pending', 'dispatched', 'received back', 'completed', 'in progress'].includes(normalized)) {
+  if (normalized === 'pendingapproval') return 'pending approval';
+  if (['pending', 'dispatched', 'received back', 'completed', 'in progress', 'pending approval', 'rejected'].includes(normalized)) {
     return normalized;
   }
   return 'pending';
@@ -26,7 +74,7 @@ const resolvePartyName = async (partyId, explicitName, userId) => {
   return party?.name || 'Unknown';
 };
 
-const normalizeLotPayload = async (payload, userId) => {
+const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
   const lotNo = payload.lotNo || payload.lotNumber || '';
   const designNo = payload.designNo || '';
   const fabric = payload.fabric === '__custom' ? payload.customFabric || '' : payload.fabric || payload.itemType || '';
@@ -43,6 +91,7 @@ const normalizeLotPayload = async (payload, userId) => {
 
   return {
     userId,
+    businessOwnerId,
     lotNo,
     designNo,
     description: notes,
@@ -113,15 +162,22 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
     normalized.totalAmount = Number(payload.totalAmount);
   }
 
+  if (payload.rejectionNote !== undefined) {
+    normalized.rejectionNote = String(payload.rejectionNote || '').trim();
+  }
+
   return normalized;
 };
 
-const syncPartyLedgerForLot = async (lot, userId) => {
+const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   if (!lot.partyId || !lot.lotNumber) return;
-  if (lot.status !== 'dispatched' && lot.status !== 'received back' && lot.status !== 'completed') return;
+  const synced = ['dispatched', 'received back', 'completed', 'in progress', 'pending approval', 'rejected'];
+  const ls = normalizeStatus(lot.status);
+  if (!synced.includes(ls)) return;
 
   const entryData = {
     userId,
+    businessOwnerId,
     lotId: lot.id || lot._id || lot.lotNumber,
     lotNumber: lot.lotNumber || lot.lotNo,
     designNo: lot.designNo || '',
@@ -134,13 +190,13 @@ const syncPartyLedgerForLot = async (lot, userId) => {
     completeDate: lot.receivedBackDate ? new Date(lot.receivedBackDate) : null,
     partyId: lot.partyId,
     partyName: lot.partyName || 'Unknown',
-    status: lot.status,
+    status: ls,
     billAmount: Number(lot.billAmount || 0),
     receipt: lot.receipt || '',
     notes: lot.notes || '',
   };
 
-  const existing = await PartyLedger.findOne({ userId, $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }] });
+  const existing = await PartyLedger.findOne({ userId, businessOwnerId, $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }] });
   if (existing) {
     Object.assign(existing, entryData);
     await existing.save();
@@ -155,17 +211,127 @@ const syncPartyLedgerForLot = async (lot, userId) => {
 // Get all Ghausia lots
 router.get('/', async (req, res) => {
   try {
-    const lots = await GhausiaLot.find({ userId: getUserId(req) }).sort({ receivedDate: -1 });
+    const partyAllBiz = String(req.query.partyScope || '').toLowerCase() === 'all' && isParty(req.user);
+    const allWorkspaces = String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user);
+
+    let filter;
+    if (partyAllBiz) {
+      filter = getPartyAllBusinessLotsFilter(req.user);
+    } else if (allWorkspaces) {
+      filter = { userId: getDataOwnerId(req.user) };
+    } else {
+      filter = getScopedFilter(req);
+    }
+    const lots = await GhausiaLot.find(filter).sort({ receivedDate: -1 });
     res.json(lots);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching lots', error: error.message });
   }
 });
 
+// Admin: approve party completion submission (pending approval → billable received back)
+router.post('/:id/approve-completion', async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
+    const lot = await GhausiaLot.findOne({ _id: req.params.id, userId });
+    if (!lot) {
+      return res.status(404).json({ message: 'Lot not found' });
+    }
+    const cur = normalizeStatus(lot.status);
+    if (cur !== 'pending approval') {
+      return res.status(400).json({ message: 'Lot is not awaiting approval' });
+    }
+
+    lot.status = 'received back';
+    lot.rejectionNote = '';
+    await lot.save();
+
+    const lotIdStr = String(lot._id);
+    await PartyEdit.findOneAndUpdate(
+      {
+        lotId: lotIdStr,
+        userId,
+        businessOwnerId: lot.businessOwnerId,
+      },
+      {
+        $set: {
+          overrideStatus: 'Completed',
+          completeDate: lot.receivedBackDate || new Date(),
+        },
+        $setOnInsert: {
+          lotId: lotIdStr,
+          userId,
+          businessOwnerId: lot.businessOwnerId,
+        },
+      },
+      { upsert: true, new: true, runValidators: true },
+    );
+
+    await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
+    res.json(lot);
+  } catch (error) {
+    res.status(400).json({ message: 'Could not approve lot', error: error.message });
+  }
+});
+
+// Admin: reject party completion — lot becomes rejected until party resubmits
+router.post('/:id/reject-completion', async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
+    const note = String(req.body?.rejectionNote ?? req.body?.rejectionReason ?? '').trim();
+    if (!note) {
+      return res.status(400).json({ message: 'Rejection description is required' });
+    }
+
+    const lot = await GhausiaLot.findOne({ _id: req.params.id, userId });
+    if (!lot) {
+      return res.status(404).json({ message: 'Lot not found' });
+    }
+    const cur = normalizeStatus(lot.status);
+    if (cur !== 'pending approval') {
+      return res.status(400).json({ message: 'Lot is not awaiting approval' });
+    }
+
+    lot.status = 'rejected';
+    lot.rejectionNote = note;
+    await lot.save();
+
+    const lotIdStr = String(lot._id);
+    await PartyEdit.findOneAndUpdate(
+      {
+        lotId: lotIdStr,
+        userId,
+        businessOwnerId: lot.businessOwnerId,
+      },
+      {
+        $set: {
+          overrideStatus: 'Rejected',
+        },
+        $setOnInsert: {
+          lotId: lotIdStr,
+          userId,
+          businessOwnerId: lot.businessOwnerId,
+        },
+      },
+      { upsert: true, new: true, runValidators: true },
+    );
+
+    await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
+    res.json(lot);
+  } catch (error) {
+    res.status(400).json({ message: 'Could not reject lot', error: error.message });
+  }
+});
+
 // Get single lot
 router.get('/:id', async (req, res) => {
   try {
-    const lot = await GhausiaLot.findOne({ _id: req.params.id, userId: getUserId(req) });
+    const filter = isParty(req.user)
+      ? getPartyAccessibleLotFilter(req.user, { _id: req.params.id })
+      : getScopedFilter(req, { _id: req.params.id });
+    const lot = await GhausiaLot.findOne(filter);
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }
@@ -178,13 +344,22 @@ router.get('/:id', async (req, res) => {
 // Create lot
 router.post('/', async (req, res) => {
   try {
-    const userId = getUserId(req);
-    const payload = await normalizeLotPayload(stripOwnership(req.body), userId);
+    if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
+    const payload = await normalizeLotPayload(stripOwnership(req.body), userId, req.businessOwnerId);
+    await ensureLotNumberUniqueInCollection(userId, req.businessOwnerId, canonicalLotNumberFromDoc(payload));
+
     const lot = new GhausiaLot(payload);
     const savedLot = await lot.save();
-    await syncPartyLedgerForLot(savedLot, userId);
+    await syncPartyLedgerForLot(savedLot, userId, req.businessOwnerId);
     res.status(201).json(savedLot);
   } catch (error) {
+    if (error.code === 'DUPLICATE_LOT_NUMBER') {
+      return res.status(409).json({ message: error.message });
+    }
+    if (error.code === 'MISSING_BUSINESS_OWNER') {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(400).json({ message: 'Error creating lot', error: error.message });
   }
 });
@@ -192,19 +367,79 @@ router.post('/', async (req, res) => {
 // Update lot
 router.patch('/:id', async (req, res) => {
   try {
-    const userId = getUserId(req);
-    const payload = await normalizeLotUpdatePayload(req.body, userId);
+    const userId = getDataOwnerId(req.user);
+    const lotQuery = isParty(req.user)
+      ? getPartyAccessibleLotFilter(req.user, { _id: req.params.id })
+      : getScopedFilter(req, { _id: req.params.id });
+    const body = isParty(req.user)
+      ? Object.fromEntries(Object.entries(req.body).filter(([key]) => partyEditableLotFields.has(key)))
+      : req.body;
+    const existing = await GhausiaLot.findOne(lotQuery);
+    if (!existing) {
+      return res.status(404).json({ message: 'Lot not found' });
+    }
+
+    const payload = await normalizeLotUpdatePayload(body, userId);
+
+    if (isParty(req.user) && payload.status) {
+      const next = normalizeStatus(payload.status);
+      const cur = normalizeStatus(existing.status);
+      if (next === 'received back' || next === 'completed') {
+        return res.status(403).json({
+          message:
+            'You cannot mark a lot billable directly. Submit for completion from your Party Ledger.',
+        });
+      }
+      if (next === 'pending approval') {
+        if (cur === 'rejected') {
+          return res.status(400).json({
+            message:
+              'This lot was rejected — switch it back to In Progress before submitting again.',
+          });
+        }
+        // Allow pending: ledger often shows In Progress while Ghausia row is still "pending" until dispatch is recorded.
+        const allowedPrev = ['pending', 'dispatched', 'in progress'];
+        if (!allowedPrev.includes(cur)) {
+          return res.status(400).json({
+            message:
+              'You can submit for approval only when the lot is pending, dispatched, or in progress.',
+          });
+        }
+      }
+      if (next === 'dispatched' && cur === 'rejected') {
+        payload.rejectionNote = '';
+      }
+    }
+
+    const merged = { ...existing.toObject(), ...payload };
+    await ensureLotNumberUniqueInCollection(
+      userId,
+      existing.businessOwnerId,
+      canonicalLotNumberFromDoc(merged),
+      existing._id,
+    );
+
     const lot = await GhausiaLot.findOneAndUpdate(
-      { _id: req.params.id, userId },
+      lotQuery,
       payload,
       { new: true, runValidators: true }
     );
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }
-    await syncPartyLedgerForLot(lot, userId);
+    await syncPartyLedgerForLot(
+      lot.toObject({ virtuals: true }),
+      userId,
+      lot.businessOwnerId,
+    );
     res.json(lot);
   } catch (error) {
+    if (error.code === 'DUPLICATE_LOT_NUMBER') {
+      return res.status(409).json({ message: error.message });
+    }
+    if (error.code === 'MISSING_BUSINESS_OWNER') {
+      return res.status(400).json({ message: error.message });
+    }
     res.status(400).json({ message: 'Error updating lot', error: error.message });
   }
 });
@@ -212,7 +447,8 @@ router.patch('/:id', async (req, res) => {
 // Delete lot
 router.delete('/:id', async (req, res) => {
   try {
-    const lot = await GhausiaLot.findOneAndDelete({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const lot = await GhausiaLot.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }

@@ -1,14 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const SavedDesign = require('../models/SavedDesign');
+const { getDataOwnerId, requireAdminUser } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
 
 // Get all saved designs
 router.get('/', async (req, res) => {
   try {
-    const designs = await SavedDesign.find({ userId: getUserId(req) }).sort({ createdAt: -1 });
+    if (!requireAdminUser(req, res)) return;
+    const designs = await SavedDesign.find({ userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }).sort({ createdAt: -1 });
     const normalized = designs.map(d => ({
       ...d.toObject(),
       id: d._id.toString(),
@@ -22,7 +23,8 @@ router.get('/', async (req, res) => {
 // Get single saved design
 router.get('/:id', async (req, res) => {
   try {
-    const design = await SavedDesign.findOne({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const design = await SavedDesign.findOne({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!design) {
       return res.status(404).json({ message: 'Saved design not found' });
     }
@@ -35,7 +37,8 @@ router.get('/:id', async (req, res) => {
 // Create saved design
 router.post('/', async (req, res) => {
   try {
-    const design = new SavedDesign({ ...stripOwnership(req.body), userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const design = new SavedDesign({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const saved = await design.save();
     res.status(201).json({ ...saved.toObject(), id: saved._id.toString() });
   } catch (error) {
@@ -46,8 +49,9 @@ router.post('/', async (req, res) => {
 // Update saved design
 router.patch('/:id', async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const design = await SavedDesign.findOneAndUpdate(
-      { _id: req.params.id, userId: getUserId(req) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );
@@ -63,7 +67,8 @@ router.patch('/:id', async (req, res) => {
 // Delete saved design
 router.delete('/:id', async (req, res) => {
   try {
-    const design = await SavedDesign.findOneAndDelete({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const design = await SavedDesign.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!design) {
       return res.status(404).json({ message: 'Saved design not found' });
     }

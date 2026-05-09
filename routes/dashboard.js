@@ -4,16 +4,24 @@ const Collection = require('../models/Collection');
 const Party = require('../models/Party');
 const Payment = require('../models/Payment');
 const PartyLedger = require('../models/PartyLedger');
+const { getDataOwnerId, isParty } = require('../utils/access');
 
 // Get dashboard statistics
 router.get('/', async (req, res) => {
   try {
-    const userId = req.user._id;
-    const userFilter = { userId };
+    const userId = getDataOwnerId(req.user);
+    const partyFilter = isParty(req.user) ? { partyId: String(req.user.partyId || '') } : {};
+    const paymentPartyFilter = isParty(req.user)
+      ? { $or: [{ partyId: String(req.user.partyId || '') }, { party: req.user.partyName || '' }] }
+      : {};
+    const ownerFilter = { userId, businessOwnerId: req.businessOwnerId };
+    const userFilter = { ...ownerFilter, ...partyFilter };
 
     const totalCollections = await Collection.countDocuments(userFilter);
-    const totalParties = await Party.countDocuments(userFilter);
-    const totalPayments = await Payment.countDocuments(userFilter);
+    const totalParties = isParty(req.user)
+      ? await Party.countDocuments({ ...ownerFilter, _id: req.user.partyId })
+      : await Party.countDocuments(userFilter);
+    const totalPayments = await Payment.countDocuments({ ...ownerFilter, ...paymentPartyFilter });
     
     // Get payments from current month
     const currentMonth = new Date();
@@ -21,7 +29,8 @@ router.get('/', async (req, res) => {
     const monthlyPayments = await Payment.aggregate([
       {
         $match: {
-          userId,
+          ...ownerFilter,
+          ...paymentPartyFilter,
           paymentDate: { $gte: currentMonth },
           status: 'completed'
         }
@@ -40,7 +49,8 @@ router.get('/', async (req, res) => {
     const yearlyPayments = await Payment.aggregate([
       {
         $match: {
-          userId,
+          ...ownerFilter,
+          ...paymentPartyFilter,
           paymentDate: { $gte: yearStart },
           status: 'completed'
         }
@@ -56,7 +66,7 @@ router.get('/', async (req, res) => {
     // Calculate pending payments
     const pendingPayments = await PartyLedger.aggregate([
       {
-        $match: { userId, type: 'debit' }
+        $match: { ...ownerFilter, ...partyFilter, type: 'debit' }
       },
       {
         $group: {

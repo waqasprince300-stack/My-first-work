@@ -1,14 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const RateCalculation = require('../models/RateCalculation');
+const { getDataOwnerId, requireAdminUser } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
 
 // Get all rate calculations
 router.get('/', async (req, res) => {
   try {
-    const calculations = await RateCalculation.find({ userId: getUserId(req) }).sort({ calculationDate: -1 });
+    if (!requireAdminUser(req, res)) return;
+    const calculations = await RateCalculation.find({ userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }).sort({ calculationDate: -1 });
     res.json(calculations);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching calculations', error: error.message });
@@ -18,7 +19,8 @@ router.get('/', async (req, res) => {
 // Create rate calculation
 router.post('/', async (req, res) => {
   try {
-    const calculation = new RateCalculation({ ...stripOwnership(req.body), userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const calculation = new RateCalculation({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const savedCalculation = await calculation.save();
     res.status(201).json(savedCalculation);
   } catch (error) {
@@ -29,8 +31,9 @@ router.post('/', async (req, res) => {
 // Update rate calculation
 router.patch('/:id', async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const calculation = await RateCalculation.findOneAndUpdate(
-      { _id: req.params.id, userId: getUserId(req) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );

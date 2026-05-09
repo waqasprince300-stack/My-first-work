@@ -1,14 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const Party = require('../models/Party');
+const { getDataOwnerId, isParty, requireAdminUser } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
 
 // Get all parties
 router.get('/', async (req, res) => {
   try {
-    const parties = await Party.find({ userId: getUserId(req) }).sort({ name: 1 });
+    const filter = isParty(req.user)
+      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
+      : { userId: getDataOwnerId(req.user) };
+    const parties = await Party.find(filter).sort({ name: 1 });
     res.json(parties);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching parties', error: error.message });
@@ -18,7 +21,10 @@ router.get('/', async (req, res) => {
 // Get single party
 router.get('/:id', async (req, res) => {
   try {
-    const party = await Party.findOne({ _id: req.params.id, userId: getUserId(req) });
+    const filter = isParty(req.user)
+      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
+      : { userId: getDataOwnerId(req.user), _id: req.params.id };
+    const party = await Party.findOne(filter);
     if (!party) {
       return res.status(404).json({ message: 'Party not found' });
     }
@@ -31,7 +37,8 @@ router.get('/:id', async (req, res) => {
 // Create party
 router.post('/', async (req, res) => {
   try {
-    const party = new Party({ ...stripOwnership(req.body), userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const party = new Party({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const savedParty = await party.save();
     res.status(201).json(savedParty);
   } catch (error) {
@@ -42,8 +49,9 @@ router.post('/', async (req, res) => {
 // Update party
 router.patch('/:id', async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const party = await Party.findOneAndUpdate(
-      { _id: req.params.id, userId: getUserId(req) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );
@@ -59,7 +67,8 @@ router.patch('/:id', async (req, res) => {
 // Delete party
 router.delete('/:id', async (req, res) => {
   try {
-    const party = await Party.findOneAndDelete({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const party = await Party.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!party) {
       return res.status(404).json({ message: 'Party not found' });
     }

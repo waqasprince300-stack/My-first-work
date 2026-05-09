@@ -21,6 +21,58 @@ const userSchema = new mongoose.Schema({
     minlength: 8,
     select: false,
   },
+  role: {
+    type: String,
+    enum: ['admin', 'party'],
+    default: 'party',
+  },
+  status: {
+    type: String,
+    enum: ['pending', 'approved', 'rejected', 'disabled'],
+    default: 'pending',
+    index: true,
+  },
+  ownerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true,
+  },
+  pendingForAdminId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true,
+  },
+  partyId: {
+    type: String,
+    default: '',
+  },
+  partyName: {
+    type: String,
+    default: '',
+  },
+  businessOwnerId: {
+    type: String,
+    default: '',
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  approvedAt: {
+    type: Date,
+    default: null,
+  },
+  rejectedAt: {
+    type: Date,
+    default: null,
+  },
+  disabledAt: {
+    type: Date,
+    default: null,
+  },
   passwordResetToken: {
     type: String,
     select: false,

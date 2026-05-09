@@ -7,6 +7,12 @@ const savedDesignSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   designNumber: {
     type: String,
     required: true,

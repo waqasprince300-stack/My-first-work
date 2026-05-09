@@ -7,6 +7,12 @@ const partySchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   name: {
     type: String,
     required: true,
@@ -62,6 +68,6 @@ const partySchema = new mongoose.Schema({
   timestamps: true,
 });
 
-partySchema.index({ userId: 1, name: 1 }, { unique: true });
+partySchema.index({ userId: 1, businessOwnerId: 1, name: 1 }, { unique: true });
 
 module.exports = mongoose.model('Party', partySchema);

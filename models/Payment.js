@@ -7,6 +7,12 @@ const paymentSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   type: {
     type: String,
     enum: ['Received', 'Paid'],
@@ -19,6 +25,10 @@ const paymentSchema = new mongoose.Schema({
     min: 0,
   },
   party: {
+    type: String,
+    default: '',
+  },
+  partyId: {
     type: String,
     default: '',
   },

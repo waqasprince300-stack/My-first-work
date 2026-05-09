@@ -6,6 +6,8 @@ const socketIO = require('socket.io');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const authenticate = require('./middleware/auth');
+const { requireApproved, requireTenantAdmin } = require('./middleware/auth');
+const { resolveBusinessOwner } = require('./utils/access');
 
 // Import routes
 const collectionsRouter = require('./routes/collections');
@@ -18,6 +20,8 @@ const partyEditsRouter = require('./routes/partyEdits');
 const rateCalculationsRouter = require('./routes/rateCalculations');
 const savedDesignsRouter = require('./routes/savedDesigns');
 const dashboardRouter = require('./routes/dashboard');
+const usersRouter = require('./routes/users');
+const businessOwnersRouter = require('./routes/businessOwners');
 
 const app = express();
 const server = http.createServer(app);
@@ -104,15 +108,19 @@ app.use((req, res, next) => {
 // ✅ Routes
 // app.use('/api/auth', authRouter);
 app.use('/api', authRouter);
-app.use('/api/collections', authenticate, collectionsRouter);
-app.use('/api/parties', authenticate, partiesRouter);
-app.use('/api/ghausiaLots', authenticate, ghausiaLotsRouter);
-app.use('/api/payments', authenticate, paymentsRouter);
-app.use('/api/partyLedger', authenticate, partyLedgerRouter);
-app.use('/api/partyEdits', authenticate, partyEditsRouter);
-app.use('/api/rateCalculations', authenticate, rateCalculationsRouter);
-app.use('/api/savedDesigns', authenticate, savedDesignsRouter);
-app.use('/api/dashboard', authenticate, dashboardRouter);
+app.use('/api/users', authenticate, requireApproved, usersRouter);
+app.use('/api/approval-users', authenticate, requireApproved, usersRouter);
+app.use('/api/approvals/users', authenticate, requireApproved, usersRouter);
+app.use('/api/businessOwners', authenticate, requireApproved, requireTenantAdmin, businessOwnersRouter);
+app.use('/api/collections', authenticate, requireApproved, resolveBusinessOwner, collectionsRouter);
+app.use('/api/parties', authenticate, requireApproved, resolveBusinessOwner, partiesRouter);
+app.use('/api/ghausiaLots', authenticate, requireApproved, resolveBusinessOwner, ghausiaLotsRouter);
+app.use('/api/payments', authenticate, requireApproved, resolveBusinessOwner, paymentsRouter);
+app.use('/api/partyLedger', authenticate, requireApproved, resolveBusinessOwner, partyLedgerRouter);
+app.use('/api/partyEdits', authenticate, requireApproved, resolveBusinessOwner, partyEditsRouter);
+app.use('/api/rateCalculations', authenticate, requireApproved, resolveBusinessOwner, rateCalculationsRouter);
+app.use('/api/savedDesigns', authenticate, requireApproved, resolveBusinessOwner, savedDesignsRouter);
+app.use('/api/dashboard', authenticate, requireApproved, resolveBusinessOwner, dashboardRouter);
 
 
 // ✅ Health check

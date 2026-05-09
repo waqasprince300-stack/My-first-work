@@ -1,14 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const Collection = require('../models/Collection');
+const { getDataOwnerId, requireAdminUser } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
 
 // Get all collections
 router.get('/', async (req, res) => {
   try {
-    const collections = await Collection.find({ userId: getUserId(req) }).sort({ date: -1 });
+    if (!requireAdminUser(req, res)) return;
+    const collections = await Collection.find({ userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }).sort({ date: -1 });
     res.json(collections);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching collections', error: error.message });
@@ -18,7 +19,8 @@ router.get('/', async (req, res) => {
 // Get single collection
 router.get('/:id', async (req, res) => {
   try {
-    const collection = await Collection.findOne({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const collection = await Collection.findOne({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!collection) {
       return res.status(404).json({ message: 'Collection not found' });
     }
@@ -31,7 +33,8 @@ router.get('/:id', async (req, res) => {
 // Create collection
 router.post('/', async (req, res) => {
   try {
-    const collection = new Collection({ ...stripOwnership(req.body), userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const collection = new Collection({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const savedCollection = await collection.save();
     res.status(201).json(savedCollection);
   } catch (error) {
@@ -42,8 +45,9 @@ router.post('/', async (req, res) => {
 // Update collection
 router.patch('/:id', async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const collection = await Collection.findOneAndUpdate(
-      { _id: req.params.id, userId: getUserId(req) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );
@@ -59,7 +63,8 @@ router.patch('/:id', async (req, res) => {
 // Delete collection
 router.delete('/:id', async (req, res) => {
   try {
-    const collection = await Collection.findOneAndDelete({ _id: req.params.id, userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const collection = await Collection.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     if (!collection) {
       return res.status(404).json({ message: 'Collection not found' });
     }

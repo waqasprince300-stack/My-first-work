@@ -7,6 +7,12 @@ const rateCalculationSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   itemType: {
     type: String,
     required: true,

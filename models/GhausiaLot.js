@@ -7,6 +7,12 @@ const ghausiaLotSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   lotNo: {
     type: String,
     trim: true,
@@ -119,7 +125,13 @@ const ghausiaLotSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'dispatched', 'received back', 'completed', 'in progress', 'Pending', 'Dispatched', 'Received Back', 'Completed', 'In Progress', 'processing'],
+    enum: [
+      'pending', 'dispatched', 'received back', 'completed', 'in progress',
+      'pending approval', 'rejected',
+      'Pending', 'Dispatched', 'Received Back', 'Completed', 'In Progress',
+      'Pending Approval', 'Rejected',
+      'processing',
+    ],
     default: 'pending',
     required: false,
   },
@@ -128,8 +140,25 @@ const ghausiaLotSchema = new mongoose.Schema({
     default: '',
     required: false,
   },
+  rejectionNote: {
+    type: String,
+    default: '',
+    required: false,
+  },
 }, {
   timestamps: true,
 });
+
+// Lot numbers are unique per (user × business workspace), not globally on lotNumber.
+// Legacy databases may still have `{ lotNumber: 1 }, { unique: true }` — run:
+// `npm run migrate:lot-indexes` to drop it and sync this compound index.
+ghausiaLotSchema.index(
+  { userId: 1, businessOwnerId: 1, lotNumber: 1 },
+  {
+    unique: true,
+    name: 'userId_1_businessOwnerId_1_lotNumber_1_partial_unique',
+    partialFilterExpression: { lotNumber: { $exists: true, $type: 'string', $gt: '' } },
+  },
+);
 
 module.exports = mongoose.model('GhausiaLot', ghausiaLotSchema);

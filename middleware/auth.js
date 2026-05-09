@@ -36,4 +36,27 @@ const authenticate = async (req, res, next) => {
   }
 };
 
+const requireApproved = (req, res, next) => {
+  if (req.user?.status !== 'approved') {
+    return res.status(403).json({ message: 'Account is not approved yet' });
+  }
+
+  next();
+};
+
+/** Approved tenant (business) admin — manages businesses, parties, operational data. */
+const requireTenantAdmin = (req, res, next) => {
+  if (req.user?.status !== 'approved' || req.user?.role !== 'admin') {
+    return res.status(403).json({ message: 'Business admin access required' });
+  }
+
+  next();
+};
+
+/** @deprecated Use requireTenantAdmin */
+const requireAdmin = requireTenantAdmin;
+
 module.exports = authenticate;
+module.exports.requireApproved = requireApproved;
+module.exports.requireTenantAdmin = requireTenantAdmin;
+module.exports.requireAdmin = requireAdmin;

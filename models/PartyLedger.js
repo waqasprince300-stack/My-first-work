@@ -7,6 +7,12 @@ const partyLedgerSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  businessOwnerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessOwner',
+    required: true,
+    index: true,
+  },
   lotId: {
     type: String,
     default: '',
@@ -62,7 +68,7 @@ const partyLedgerSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'dispatched', 'received back', 'completed', 'in progress'],
+    trim: true,
     default: 'pending',
   },
   billAmount: {

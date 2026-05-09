@@ -1,17 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const PartyLedger = require('../models/PartyLedger');
+const { getDataOwnerId, getScopedFilter, isParty, requireAdminUser } = require('../utils/access');
 
-const getUserId = (req) => req.user._id;
 const stripOwnership = ({ userId, ...data }) => data;
 
 // Get all ledger entries
 router.get('/', async (req, res) => {
   try {
     const { partyId } = req.query;
-    let query = { userId: getUserId(req) };
+    let query = getScopedFilter(req);
     
-    if (partyId) {
+    if (partyId && !isParty(req.user)) {
       query.partyId = partyId;
     }
     
@@ -25,7 +25,8 @@ router.get('/', async (req, res) => {
 // Create ledger entry
 router.post('/', async (req, res) => {
   try {
-    const entry = new PartyLedger({ ...stripOwnership(req.body), userId: getUserId(req) });
+    if (!requireAdminUser(req, res)) return;
+    const entry = new PartyLedger({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const savedEntry = await entry.save();
     res.status(201).json(savedEntry);
   } catch (error) {
@@ -36,8 +37,9 @@ router.post('/', async (req, res) => {
 // Update ledger entry
 router.patch('/:id', async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const entry = await PartyLedger.findOneAndUpdate(
-      { _id: req.params.id, userId: getUserId(req) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );
