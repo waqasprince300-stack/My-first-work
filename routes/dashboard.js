@@ -8,9 +8,12 @@ const PartyLedger = require('../models/PartyLedger');
 // Get dashboard statistics
 router.get('/', async (req, res) => {
   try {
-    const totalCollections = await Collection.countDocuments();
-    const totalParties = await Party.countDocuments();
-    const totalPayments = await Payment.countDocuments();
+    const userId = req.user._id;
+    const userFilter = { userId };
+
+    const totalCollections = await Collection.countDocuments(userFilter);
+    const totalParties = await Party.countDocuments(userFilter);
+    const totalPayments = await Payment.countDocuments(userFilter);
     
     // Get payments from current month
     const currentMonth = new Date();
@@ -18,6 +21,7 @@ router.get('/', async (req, res) => {
     const monthlyPayments = await Payment.aggregate([
       {
         $match: {
+          userId,
           paymentDate: { $gte: currentMonth },
           status: 'completed'
         }
@@ -36,6 +40,7 @@ router.get('/', async (req, res) => {
     const yearlyPayments = await Payment.aggregate([
       {
         $match: {
+          userId,
           paymentDate: { $gte: yearStart },
           status: 'completed'
         }
@@ -51,7 +56,7 @@ router.get('/', async (req, res) => {
     // Calculate pending payments
     const pendingPayments = await PartyLedger.aggregate([
       {
-        $match: { type: 'debit' }
+        $match: { userId, type: 'debit' }
       },
       {
         $group: {

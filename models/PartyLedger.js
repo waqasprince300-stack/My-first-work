@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const partyLedgerSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true,
+  },
   lotId: {
     type: String,
     default: '',

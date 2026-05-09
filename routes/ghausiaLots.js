@@ -4,6 +4,9 @@ const GhausiaLot = require('../models/GhausiaLot');
 const Party = require('../models/Party');
 const PartyLedger = require('../models/PartyLedger');
 
+const getUserId = (req) => req.user._id;
+const stripOwnership = ({ userId, ...data }) => data;
+
 const normalizeStatus = (status) => {
   if (!status) return 'pending';
   const normalized = String(status).trim().toLowerCase();
@@ -15,15 +18,15 @@ const normalizeStatus = (status) => {
   return 'pending';
 };
 
-const resolvePartyName = async (partyId, explicitName) => {
+const resolvePartyName = async (partyId, explicitName, userId) => {
   const normalizedName = typeof explicitName === 'string' ? explicitName.trim() : '';
   if (normalizedName) return normalizedName;
   if (!partyId) return 'Unknown';
-  const party = await Party.findOne({ $or: [{ _id: partyId }, { id: partyId }] });
+  const party = await Party.findOne({ userId, $or: [{ _id: partyId }, { id: partyId }] });
   return party?.name || 'Unknown';
 };
 
-const normalizeLotPayload = async (payload) => {
+const normalizeLotPayload = async (payload, userId) => {
   const lotNo = payload.lotNo || payload.lotNumber || '';
   const designNo = payload.designNo || '';
   const fabric = payload.fabric === '__custom' ? payload.customFabric || '' : payload.fabric || payload.itemType || '';
@@ -36,9 +39,10 @@ const normalizeLotPayload = async (payload) => {
   const status = normalizeStatus(payload.status || 'pending');
   const notes = payload.description || payload.notes || '';
   const partyId = payload.partyId ? String(payload.partyId) : '';
-  const partyName = await resolvePartyName(partyId, payload.partyName || payload.party || 'Unknown');
+  const partyName = await resolvePartyName(partyId, payload.partyName || payload.party || 'Unknown', userId);
 
   return {
+    userId,
     lotNo,
     designNo,
     description: notes,
@@ -64,8 +68,8 @@ const normalizeLotPayload = async (payload) => {
   };
 };
 
-const normalizeLotUpdatePayload = async (payload) => {
-  const normalized = { ...payload };
+const normalizeLotUpdatePayload = async (payload, userId) => {
+  const normalized = stripOwnership(payload);
 
   if (payload.status) {
     normalized.status = normalizeStatus(payload.status);
@@ -80,7 +84,7 @@ const normalizeLotUpdatePayload = async (payload) => {
   }
 
   if (!normalized.partyName && normalized.partyId) {
-    normalized.partyName = await resolvePartyName(normalized.partyId, 'Unknown');
+    normalized.partyName = await resolvePartyName(normalized.partyId, 'Unknown', userId);
   }
 
   if (payload.lotNumber || payload.lotNo) {
@@ -112,11 +116,12 @@ const normalizeLotUpdatePayload = async (payload) => {
   return normalized;
 };
 
-const syncPartyLedgerForLot = async (lot) => {
+const syncPartyLedgerForLot = async (lot, userId) => {
   if (!lot.partyId || !lot.lotNumber) return;
   if (lot.status !== 'dispatched' && lot.status !== 'received back' && lot.status !== 'completed') return;
 
   const entryData = {
+    userId,
     lotId: lot.id || lot._id || lot.lotNumber,
     lotNumber: lot.lotNumber || lot.lotNo,
     designNo: lot.designNo || '',
@@ -135,7 +140,7 @@ const syncPartyLedgerForLot = async (lot) => {
     notes: lot.notes || '',
   };
 
-  const existing = await PartyLedger.findOne({ $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }] });
+  const existing = await PartyLedger.findOne({ userId, $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }] });
   if (existing) {
     Object.assign(existing, entryData);
     await existing.save();
@@ -150,7 +155,7 @@ const syncPartyLedgerForLot = async (lot) => {
 // Get all Ghausia lots
 router.get('/', async (req, res) => {
   try {
-    const lots = await GhausiaLot.find().sort({ receivedDate: -1 });
+    const lots = await GhausiaLot.find({ userId: getUserId(req) }).sort({ receivedDate: -1 });
     res.json(lots);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching lots', error: error.message });
@@ -160,7 +165,7 @@ router.get('/', async (req, res) => {
 // Get single lot
 router.get('/:id', async (req, res) => {
   try {
-    const lot = await GhausiaLot.findById(req.params.id);
+    const lot = await GhausiaLot.findOne({ _id: req.params.id, userId: getUserId(req) });
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }
@@ -173,10 +178,11 @@ router.get('/:id', async (req, res) => {
 // Create lot
 router.post('/', async (req, res) => {
   try {
-    const payload = await normalizeLotPayload(req.body);
+    const userId = getUserId(req);
+    const payload = await normalizeLotPayload(stripOwnership(req.body), userId);
     const lot = new GhausiaLot(payload);
     const savedLot = await lot.save();
-    await syncPartyLedgerForLot(savedLot);
+    await syncPartyLedgerForLot(savedLot, userId);
     res.status(201).json(savedLot);
   } catch (error) {
     res.status(400).json({ message: 'Error creating lot', error: error.message });
@@ -186,16 +192,17 @@ router.post('/', async (req, res) => {
 // Update lot
 router.patch('/:id', async (req, res) => {
   try {
-    const payload = await normalizeLotUpdatePayload(req.body);
-    const lot = await GhausiaLot.findByIdAndUpdate(
-      req.params.id,
+    const userId = getUserId(req);
+    const payload = await normalizeLotUpdatePayload(req.body, userId);
+    const lot = await GhausiaLot.findOneAndUpdate(
+      { _id: req.params.id, userId },
       payload,
       { new: true, runValidators: true }
     );
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }
-    await syncPartyLedgerForLot(lot);
+    await syncPartyLedgerForLot(lot, userId);
     res.json(lot);
   } catch (error) {
     res.status(400).json({ message: 'Error updating lot', error: error.message });
@@ -205,7 +212,7 @@ router.patch('/:id', async (req, res) => {
 // Delete lot
 router.delete('/:id', async (req, res) => {
   try {
-    const lot = await GhausiaLot.findByIdAndDelete(req.params.id);
+    const lot = await GhausiaLot.findOneAndDelete({ _id: req.params.id, userId: getUserId(req) });
     if (!lot) {
       return res.status(404).json({ message: 'Lot not found' });
     }

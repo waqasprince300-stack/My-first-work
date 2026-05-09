@@ -1,10 +1,15 @@
 const mongoose = require('mongoose');
 
 const partySchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true,
+  },
   name: {
     type: String,
     required: true,
-    unique: true,
     trim: true,
   },
   contactPerson: {
@@ -56,5 +61,7 @@ const partySchema = new mongoose.Schema({
 }, {
   timestamps: true,
 });
+
+partySchema.index({ userId: 1, name: 1 }, { unique: true });
 
 module.exports = mongoose.model('Party', partySchema);

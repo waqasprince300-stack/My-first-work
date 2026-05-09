@@ -2,10 +2,13 @@ const express = require('express');
 const router = express.Router();
 const RateCalculation = require('../models/RateCalculation');
 
+const getUserId = (req) => req.user._id;
+const stripOwnership = ({ userId, ...data }) => data;
+
 // Get all rate calculations
 router.get('/', async (req, res) => {
   try {
-    const calculations = await RateCalculation.find().sort({ calculationDate: -1 });
+    const calculations = await RateCalculation.find({ userId: getUserId(req) }).sort({ calculationDate: -1 });
     res.json(calculations);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching calculations', error: error.message });
@@ -15,7 +18,7 @@ router.get('/', async (req, res) => {
 // Create rate calculation
 router.post('/', async (req, res) => {
   try {
-    const calculation = new RateCalculation(req.body);
+    const calculation = new RateCalculation({ ...stripOwnership(req.body), userId: getUserId(req) });
     const savedCalculation = await calculation.save();
     res.status(201).json(savedCalculation);
   } catch (error) {
@@ -26,9 +29,9 @@ router.post('/', async (req, res) => {
 // Update rate calculation
 router.patch('/:id', async (req, res) => {
   try {
-    const calculation = await RateCalculation.findByIdAndUpdate(
-      req.params.id,
-      req.body,
+    const calculation = await RateCalculation.findOneAndUpdate(
+      { _id: req.params.id, userId: getUserId(req) },
+      stripOwnership(req.body),
       { new: true, runValidators: true }
     );
     if (!calculation) {

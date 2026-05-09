@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const rateCalculationSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true,
+  },
   itemType: {
     type: String,
     required: true,

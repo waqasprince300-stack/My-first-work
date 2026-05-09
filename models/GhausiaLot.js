@@ -1,6 +1,12 @@
 const mongoose = require('mongoose');
 
 const ghausiaLotSchema = new mongoose.Schema({
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true,
+  },
   lotNo: {
     type: String,
     trim: true,
@@ -59,7 +65,6 @@ const ghausiaLotSchema = new mongoose.Schema({
   lotNumber: {
     type: String,
     trim: true,
-    unique: true,
     default: '',
     required: false,
   },

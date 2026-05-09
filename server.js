@@ -5,9 +5,11 @@ const http = require('http');
 const socketIO = require('socket.io');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
+const authenticate = require('./middleware/auth');
 
 // Import routes
 const collectionsRouter = require('./routes/collections');
+const authRouter = require('./routes/auth');
 const partiesRouter = require('./routes/parties');
 const ghausiaLotsRouter = require('./routes/ghausiaLots');
 const paymentsRouter = require('./routes/payments');
@@ -100,15 +102,17 @@ app.use((req, res, next) => {
 
 
 // ✅ Routes
-app.use('/api/collections', collectionsRouter);
-app.use('/api/parties', partiesRouter);
-app.use('/api/ghausiaLots', ghausiaLotsRouter);
-app.use('/api/payments', paymentsRouter);
-app.use('/api/partyLedger', partyLedgerRouter);
-app.use('/api/partyEdits', partyEditsRouter);
-app.use('/api/rateCalculations', rateCalculationsRouter);
-app.use('/api/savedDesigns', savedDesignsRouter);
-app.use('/api/dashboard', dashboardRouter);
+// app.use('/api/auth', authRouter);
+app.use('/api', authRouter);
+app.use('/api/collections', authenticate, collectionsRouter);
+app.use('/api/parties', authenticate, partiesRouter);
+app.use('/api/ghausiaLots', authenticate, ghausiaLotsRouter);
+app.use('/api/payments', authenticate, paymentsRouter);
+app.use('/api/partyLedger', authenticate, partyLedgerRouter);
+app.use('/api/partyEdits', authenticate, partyEditsRouter);
+app.use('/api/rateCalculations', authenticate, rateCalculationsRouter);
+app.use('/api/savedDesigns', authenticate, savedDesignsRouter);
+app.use('/api/dashboard', authenticate, dashboardRouter);
 
 
 // ✅ Health check
