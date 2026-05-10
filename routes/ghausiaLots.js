@@ -245,9 +245,28 @@ router.post('/:id/approve-completion', async (req, res) => {
 
     lot.status = 'received back';
     lot.rejectionNote = '';
-    await lot.save();
+    lot.completionApprovedAt = new Date();
 
     const lotIdStr = String(lot._id);
+    const peDoc = await PartyEdit.findOne({
+      lotId: lotIdStr,
+      userId,
+      businessOwnerId: lot.businessOwnerId,
+    });
+
+    const ownerBillingChoice = String(req.body?.ownerBillingChoice || '').trim();
+    const partyBill = Number(peDoc?.partyBillAmount ?? 0);
+    if (ownerBillingChoice === 'sync_party') {
+      lot.billAmount = partyBill;
+    } else if (ownerBillingChoice === 'delta_only' && peDoc?.pendingRevision) {
+      const fromA = Number(peDoc.pendingRevision.fromAmount ?? 0);
+      const toA = Number(peDoc.pendingRevision.toAmount ?? 0);
+      const delta = toA - fromA;
+      if (delta > 0) lot.billAmount = delta;
+    }
+
+    await lot.save();
+
     await PartyEdit.findOneAndUpdate(
       {
         lotId: lotIdStr,
@@ -264,6 +283,7 @@ router.post('/:id/approve-completion', async (req, res) => {
           userId,
           businessOwnerId: lot.businessOwnerId,
         },
+        $unset: { pendingRevision: '' },
       },
       { upsert: true, new: true, runValidators: true },
     );
@@ -314,6 +334,7 @@ router.post('/:id/reject-completion', async (req, res) => {
           userId,
           businessOwnerId: lot.businessOwnerId,
         },
+        $unset: { pendingRevision: '' },
       },
       { upsert: true, new: true, runValidators: true },
     );
@@ -380,6 +401,20 @@ router.patch('/:id', async (req, res) => {
     }
 
     const payload = await normalizeLotUpdatePayload(body, userId);
+    delete payload.completionApprovedAt;
+
+    if (!isParty(req.user)) {
+      const cur = normalizeStatus(existing.status);
+      const next = payload.status != null ? normalizeStatus(payload.status) : cur;
+      const hasApprovalTs = Boolean(existing.completionApprovedAt);
+      if (cur === 'pending approval' && next === 'received back') {
+        payload.completionApprovedAt = new Date();
+      } else if (next === 'received back' && cur !== 'received back' && !hasApprovalTs) {
+        payload.completionApprovedAt = new Date();
+      } else if (next === 'completed' && cur !== 'completed' && !hasApprovalTs) {
+        payload.completionApprovedAt = new Date();
+      }
+    }
 
     if (isParty(req.user) && payload.status) {
       const next = normalizeStatus(payload.status);

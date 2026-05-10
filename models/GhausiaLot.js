@@ -123,6 +123,12 @@ const ghausiaLotSchema = new mongoose.Schema({
     default: null,
     required: false,
   },
+  /** Set when admin approves completion (pending approval → received back) or when marking billable/completed without prior timestamp */
+  completionApprovedAt: {
+    type: Date,
+    default: null,
+    required: false,
+  },
   status: {
     type: String,
     enum: [

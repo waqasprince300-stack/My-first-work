@@ -37,6 +37,16 @@ const partyEditSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
+  /** Optional audit blob when admin changes a completed lot amount */
+  amountChangeNote: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
+  /** When party revises bill while awaiting admin approval — drives owner billing options on approve */
+  pendingRevision: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
   allotDate: {
     type: Date,
     default: null,

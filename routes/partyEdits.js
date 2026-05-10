@@ -113,9 +113,20 @@ router.put('/lot/:lotId', async (req, res) => {
       businessOwnerId = String(lot.businessOwnerId ?? '').trim();
     }
 
+    const data = { ...stripOwnership(req.body), lotId, userId, businessOwnerId };
+    const unset = {};
+    if (Object.prototype.hasOwnProperty.call(data, 'pendingRevision') && data.pendingRevision === null) {
+      unset.pendingRevision = '';
+      delete data.pendingRevision;
+    }
+    const update =
+      Object.keys(unset).length > 0
+        ? { $set: data, $unset: unset }
+        : data;
+
     const partyEdit = await PartyEdit.findOneAndUpdate(
       { lotId, userId, businessOwnerId },
-      { ...stripOwnership(req.body), lotId, userId, businessOwnerId },
+      update,
       { new: true, upsert: true, runValidators: true }
     );
     res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
