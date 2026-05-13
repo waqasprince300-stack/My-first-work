@@ -52,10 +52,6 @@ const io = socketIO(server, {
 });
 
 
-// ✅ Connect to MongoDB
-connectDB();
-
-
 // ✅ CORS Middleware (IMPORTANT)
 app.use(cors({
   origin: function (origin, callback) {
@@ -142,11 +138,18 @@ app.use(errorHandler);
 const PORT = process.env.PORT || 3001;
 
 
-// ✅ Start server
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-});
+// ✅ Start server after DB (avoids “running” log before Mongo fails)
+connectDB()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+  })
+  .catch(() => {
+    // connectDB already logged and exits; guard for non-exit edge cases
+    process.exit(1);
+  });
 
 
 // ✅ Graceful shutdown
