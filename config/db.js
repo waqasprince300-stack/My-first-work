@@ -1,50 +1,110 @@
 const dns = require('dns');
 const mongoose = require('mongoose');
+const { resolveMongoSrvViaDoh } = require('./resolveMongoSrvViaDoh');
+const { getMongooseConnectOptions } = require('./mongooseConnect');
 
-// MONGODB_URI from .env; optional MONGODB_DB_NAME when the URI omits `/dbname`.
-// If mongodb+srv fails with querySrv ECONNREFUSED, set NODE_DNS_SERVERS=8.8.8.8,1.1.1.1 (Windows DNS often blocks SRV).
+// Prefer IPv4 for DNS + TCP (helps some routers / IPv6 tunnels with Atlas).
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
+
+const dnsFailure = (msg) => /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i.test(String(msg || ''));
+
+const connectOpts = () =>
+  getMongooseConnectOptions({
+    serverSelectionTimeoutMS: 45_000,
+    socketTimeoutMS: 45_000,
+  });
+
+const wireEvents = () => {
+  mongoose.connection.on('disconnected', () => {
+    console.log('⚠️ MongoDB disconnected');
+  });
+  mongoose.connection.on('error', (err) => {
+    console.error('❌ MongoDB connection error:', err);
+  });
+};
+
+/**
+ * MONGODB_URI — primary.
+ * If mongodb+srv fails due to local DNS: tries MONGODB_FALLBACK_URI, then DNS-over-HTTPS (disable with MONGODB_DISABLE_DOH=1).
+ */
 const connectDB = async () => {
   const dnsServers = process.env.NODE_DNS_SERVERS?.trim();
   if (dnsServers) {
     dns.setServers(dnsServers.split(',').map((s) => s.trim()).filter(Boolean));
   }
 
-  const mongoUri = process.env.MONGODB_URI?.trim();
+  const primaryUri = process.env.MONGODB_URI?.trim();
+  const fallbackUri = process.env.MONGODB_FALLBACK_URI?.trim();
 
-  if (!mongoUri) {
+  if (!primaryUri) {
     console.error(
-      '❌ MONGODB_URI is missing. Set it in .env (e.g. MONGODB_URI=mongodb+srv://... or mongodb://127.0.0.1:27017/dbname)'
+      '❌ MONGODB_URI is missing. Set it in .env (e.g. MONGODB_URI=mongodb+srv://... or mongodb://127.0.0.1:27017/dbname)',
     );
     process.exit(1);
   }
 
-  try {
-    const opts = {};
-    const dbName = process.env.MONGODB_DB_NAME?.trim();
-    if (dbName) {
-      opts.dbName = dbName;
-    }
+  const opts = connectOpts();
 
-    await mongoose.connect(mongoUri, opts);
-
-    console.log('✅ MongoDB connected:', mongoose.connection.host);
+  const tryUri = async (uri, label) => {
+    await mongoose.connect(uri, opts);
+    console.log(`✅ MongoDB connected (${label}):`, mongoose.connection.host);
     console.log(`   Database: ${mongoose.connection.name}`);
+  };
 
-    mongoose.connection.on('disconnected', () => {
-      console.log('⚠️ MongoDB disconnected');
-    });
+  const primaryIsSrv = primaryUri.startsWith('mongodb+srv');
 
-    mongoose.connection.on('error', (err) => {
-      console.error('❌ MongoDB connection error:', err);
-    });
-
+  try {
+    await tryUri(primaryUri, 'primary');
+    wireEvents();
     return mongoose.connection;
   } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    if (/querySrv|ECONNREFUSED/i.test(String(error.message))) {
-      console.error(
-        '   Hint: SRV lookup failed. Try NODE_DNS_SERVERS=8.8.8.8,1.1.1.1 in .env, or fix Windows DNS / use Atlas “standard connection string” (mongodb://…).'
-      );
+    let msg = String(error.message || error);
+
+    if (primaryIsSrv && fallbackUri && dnsFailure(msg)) {
+      console.warn('');
+      console.warn('⚠️  SRV/TXT DNS failed for MONGODB_URI — retrying with MONGODB_FALLBACK_URI...');
+      console.warn('');
+      try {
+        await tryUri(fallbackUri, 'fallback');
+        wireEvents();
+        console.warn('   Tip: you can set that URI as MONGODB_URI to skip the failed srv step.');
+        return mongoose.connection;
+      } catch (err2) {
+        msg = String(err2.message || err2);
+        console.error('❌ MONGODB_FALLBACK_URI failed:', msg);
+      }
+    }
+
+    if (
+      primaryIsSrv
+      && dnsFailure(msg)
+      && process.env.MONGODB_DISABLE_DOH !== '1'
+    ) {
+      console.warn('');
+      console.warn('⚠️  Retrying via DNS-over-HTTPS (Cloudflare) — your PC DNS cannot resolve mongodb+srv.');
+      console.warn('');
+      try {
+        const standardUri = await resolveMongoSrvViaDoh(primaryUri);
+        await tryUri(standardUri, 'DNS-over-HTTPS');
+        wireEvents();
+        console.warn(
+          '   Tip: comment out NODE_DNS_SERVERS if set. Optional: paste this mongodb:// string as MONGODB_URI to avoid DoH on startup.',
+        );
+        return mongoose.connection;
+      } catch (errDoh) {
+        console.error('❌ DNS-over-HTTPS resolution/connection failed:', errDoh.message || errDoh);
+      }
+    }
+
+    console.error('❌ MongoDB connection failed:', msg);
+    if (dnsFailure(msg)) {
+      console.error('');
+      console.error('   · Fix: Atlas → Connect → Drivers → copy "mongodb://..." (standard) → MONGODB_URI or MONGODB_FALLBACK_URI');
+      console.error('   · Or fix network / VPN; Atlas Network Access → allow your IP.');
+      console.error('   · Set MONGODB_DISABLE_DOH=1 only if HTTPS DNS is blocked too.');
+      console.error('');
     }
     process.exit(1);
   }

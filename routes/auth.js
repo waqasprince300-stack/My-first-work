@@ -97,11 +97,29 @@ router.post('/signup', async (req, res) => {
       status: 'approved',
     });
 
+    const hasSuperAdmin = await User.exists({
+      role: 'super_admin',
+      status: 'approved',
+    });
+
     if (requestedRole === 'admin') {
-      if (approvedAdminCount > 0) {
-        return res.status(409).json({
+      const needsSuperApproval = !!hasSuperAdmin;
+
+      if (needsSuperApproval) {
+        const user = await User.create({
+          name,
+          email,
+          password,
+          role: 'admin',
+          status: 'pending',
+          partyId: '',
+          partyName: '',
+        });
+
+        return res.status(201).json({
           message:
-            'An organization administrator is already registered. New accounts must be party users — enter your administrator\'s email when signing up.',
+            'Your administrator account was created. The platform super administrator must approve it before you can sign in. You will receive access after approval.',
+          user,
         });
       }
 
@@ -127,7 +145,7 @@ router.post('/signup', async (req, res) => {
     if (approvedAdminCount === 0) {
       return res.status(400).json({
         message:
-          'No organization administrator exists yet. The first person must register as the organization administrator before party users can sign up.',
+          'No approved organization administrator is available yet. Your administrator must register (and be verified by the platform) before party users can join.',
       });
     }
 
@@ -183,25 +201,33 @@ router.post('/login', async (req, res) => {
       return res.status(400).json({ message: 'Email and password are required' });
     }
 
+    const emailErr = getRegistrationEmailError(email);
+    if (emailErr) {
+      return res.status(400).json({ message: emailErr });
+    }
+
     const user = await User.findOne({ email }).select('+password');
 
     if (!user || !(await user.comparePassword(password))) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    if (user.role === 'super_admin') {
-      await User.updateOne({ _id: user._id }, { $set: { role: 'admin' } });
-      user.role = 'admin';
-    }
-
     if (user.status !== 'approved') {
+      const pendingMsg =
+        user.role === 'admin'
+          ? 'Your administrator account is waiting for approval by the platform super administrator. Try again after you are verified.'
+          : 'Your account is waiting for business administrator approval';
+
       const messages = {
-        pending: 'Your account is waiting for business administrator approval',
+        pending: pendingMsg,
         rejected: 'Your account request was rejected',
         disabled: 'Your account has been disabled',
       };
 
-      return res.status(403).json({ message: messages[user.status] || 'Account is not approved' });
+      return res.status(403).json({
+        message: messages[user.status] || 'Account is not approved',
+        code: user.status === 'pending' && user.role === 'admin' ? 'ADMIN_PENDING_SUPER_APPROVAL' : undefined,
+      });
     }
 
     sendAuthResponse(res, 200, user);
@@ -222,10 +248,18 @@ router.post('/forgot-password', async (req, res) => {
       return res.status(400).json({ message: 'Email is required' });
     }
 
+    const emailErr = getRegistrationEmailError(email);
+    if (emailErr) {
+      return res.status(400).json({ message: emailErr });
+    }
+
     const user = await User.findOne({ email }).select('+passwordResetToken +passwordResetExpires');
 
     if (!user) {
-      return res.json({ message: 'If that email exists, a reset link has been generated' });
+      return res.json({
+        message:
+          'If that email is registered, a reset link has been sent. Check your inbox and spam folder.',
+      });
     }
 
     const resetToken = user.createPasswordResetToken();
@@ -234,7 +268,18 @@ router.post('/forgot-password', async (req, res) => {
     const resetUrl = `${getFrontendUrl()}/reset-password/${resetToken}`;
     const mailConfigError = getMailConfigError();
 
-    if (mailConfigError && process.env.NODE_ENV !== 'production') {
+    if (mailConfigError) {
+      if (process.env.NODE_ENV === 'production') {
+        user.passwordResetToken = undefined;
+        user.passwordResetExpires = undefined;
+        await user.save({ validateBeforeSave: false });
+
+        return res.status(503).json({
+          message:
+            'Password reset email is not configured on the server. Contact support or try again later.',
+        });
+      }
+
       return res.json({
         message: 'Email is not configured. Use this development reset link instead.',
         resetUrl,
@@ -260,12 +305,8 @@ router.post('/forgot-password', async (req, res) => {
     }
 
     const response = {
-      message: 'If that email exists, a reset link has been sent',
+      message: 'If that email is registered, a reset link has been sent. Check your inbox and spam folder.',
     };
-
-    if (process.env.NODE_ENV !== 'production') {
-      response.resetUrl = resetUrl;
-    }
 
     res.json(response);
   } catch (error) {
@@ -301,7 +342,11 @@ router.patch('/reset-password/:token', async (req, res) => {
     await user.save();
 
     if (user.status !== 'approved') {
-      return res.json({ message: 'Password reset successfully. You can login after admin approval.', user });
+      const msg =
+        user.role === 'admin'
+          ? 'Password updated. You can sign in after the platform super administrator approves your account.'
+          : 'Password reset successfully. You can sign in after your business administrator approves your account.';
+      return res.json({ message: msg, user });
     }
 
     sendAuthResponse(res, 200, user);

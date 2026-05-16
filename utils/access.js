@@ -80,11 +80,7 @@ const ensureDefaultBusinessOwner = async (user) => {
   }
 
   if (!owner) {
-    owner = await BusinessOwner.create({
-      userId,
-      name: 'Ghausia Collection',
-      isDefault: true,
-    });
+    return null;
   }
 
   const missingOwnerFilter = {
@@ -144,6 +140,13 @@ const resolveBusinessOwner = async (req, res, next) => {
       }
     } else {
       owner = await ensureDefaultBusinessOwner(req.user);
+      if (!owner) {
+        return res.status(400).json({
+          message:
+            'Create a business workspace first. Open Work Spaces (Ghausia) and add a collection name before using this feature.',
+          code: 'NO_BUSINESS_OWNER',
+        });
+      }
     }
 
     req.businessOwnerId = String(owner._id);

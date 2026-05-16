@@ -1,24 +1,25 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const { connectMongooseForScripts } = require('../config/mongooseConnect');
 
 const run = async () => {
-  const { ADMIN_NAME, ADMIN_EMAIL, ADMIN_PASSWORD, MONGODB_URI } = process.env;
+  const MONGODB_URI = process.env.MONGODB_URI;
+  const ADMIN_NAME = process.env.SUPER_ADMIN_NAME || process.env.ADMIN_NAME;
+  const ADMIN_EMAIL = process.env.SUPER_ADMIN_EMAIL || process.env.ADMIN_EMAIL;
+  const ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD;
 
   if (!MONGODB_URI) {
     throw new Error('MONGODB_URI is required');
   }
 
   if (!ADMIN_NAME || !ADMIN_EMAIL || !ADMIN_PASSWORD) {
-    throw new Error('ADMIN_NAME, ADMIN_EMAIL, and ADMIN_PASSWORD are required');
+    throw new Error(
+      'Set SUPER_ADMIN_NAME, SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD (or legacy ADMIN_NAME, ADMIN_EMAIL, ADMIN_PASSWORD)',
+    );
   }
 
-  await mongoose.connect(MONGODB_URI);
-
-  await User.updateMany(
-    { role: 'super_admin' },
-    { $set: { role: 'admin' } },
-  );
+  await connectMongooseForScripts(MONGODB_URI);
 
   const email = ADMIN_EMAIL.trim().toLowerCase();
   let user = await User.findOne({ email }).select('+password');
@@ -28,12 +29,12 @@ const run = async () => {
       name: ADMIN_NAME.trim(),
       email,
       password: ADMIN_PASSWORD,
-      role: 'admin',
+      role: 'super_admin',
       status: 'approved',
     });
   }
 
-  user.role = 'admin';
+  user.role = 'super_admin';
   user.status = 'approved';
   user.ownerId = user._id;
   user.approvedBy = user._id;
@@ -42,12 +43,9 @@ const run = async () => {
   user.disabledAt = null;
   await user.save({ validateBeforeSave: false });
 
-  await User.updateMany(
-    { _id: { $ne: user._id }, status: { $exists: false } },
-    { $set: { role: 'party', status: 'pending' } },
-  );
-
-  console.log(`Organization admin ready: ${user.email}`);
+  console.log(`Platform super administrator ready: ${user.email}`);
+  console.log('Tip: use a dedicated super-admin email (not your day-to-day org admin), so that user can approve new administrators without losing business-admin API access.');
+  console.log('Organization admins who sign up while a super admin exists will stay pending until approved in the app.');
   await mongoose.disconnect();
 };
 

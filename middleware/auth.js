@@ -53,10 +53,20 @@ const requireTenantAdmin = (req, res, next) => {
   next();
 };
 
+/** Platform super administrator — verifies organization admins. */
+const requireSuperAdmin = (req, res, next) => {
+  if (req.user?.status !== 'approved' || req.user?.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Super administrator access required' });
+  }
+
+  next();
+};
+
 /** @deprecated Use requireTenantAdmin */
 const requireAdmin = requireTenantAdmin;
 
 module.exports = authenticate;
 module.exports.requireApproved = requireApproved;
 module.exports.requireTenantAdmin = requireTenantAdmin;
+module.exports.requireSuperAdmin = requireSuperAdmin;
 module.exports.requireAdmin = requireAdmin;

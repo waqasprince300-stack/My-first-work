@@ -39,6 +39,10 @@ function domainMatchesBlocklist(domainLower) {
   const d = String(domainLower || '').toLowerCase();
   if (!d) return true;
 
+  if (d === 'local' || d.endsWith('.local') || d.endsWith('.invalid') || d.endsWith('.test')) {
+    return true;
+  }
+
   for (const suffix of BLOCKED_DOMAIN_SUFFIXES) {
     if (d === suffix || d.endsWith(`.${suffix}`)) {
       return true;

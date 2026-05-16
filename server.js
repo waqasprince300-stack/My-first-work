@@ -6,7 +6,7 @@ const socketIO = require('socket.io');
 const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const authenticate = require('./middleware/auth');
-const { requireApproved, requireTenantAdmin } = require('./middleware/auth');
+const { requireApproved, requireTenantAdmin, requireSuperAdmin } = require('./middleware/auth');
 const { resolveBusinessOwner } = require('./utils/access');
 
 // Import routes
@@ -21,6 +21,7 @@ const rateCalculationsRouter = require('./routes/rateCalculations');
 const savedDesignsRouter = require('./routes/savedDesigns');
 const dashboardRouter = require('./routes/dashboard');
 const usersRouter = require('./routes/users');
+const superAdminRouter = require('./routes/superAdmin');
 const businessOwnersRouter = require('./routes/businessOwners');
 
 const app = express();
@@ -107,6 +108,7 @@ app.use('/api', authRouter);
 app.use('/api/users', authenticate, requireApproved, usersRouter);
 app.use('/api/approval-users', authenticate, requireApproved, usersRouter);
 app.use('/api/approvals/users', authenticate, requireApproved, usersRouter);
+app.use('/api/super-admin', authenticate, requireApproved, requireSuperAdmin, superAdminRouter);
 app.use('/api/businessOwners', authenticate, requireApproved, requireTenantAdmin, businessOwnersRouter);
 app.use('/api/collections', authenticate, requireApproved, resolveBusinessOwner, collectionsRouter);
 app.use('/api/parties', authenticate, requireApproved, resolveBusinessOwner, partiesRouter);
