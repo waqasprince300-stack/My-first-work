@@ -1,7 +1,7 @@
 const express = require('express');
 const User = require('../models/User');
 const Party = require('../models/Party');
-const { resolveBusinessOwner, isTenantAdmin } = require('../utils/access');
+const { resolveBusinessOwnerAllowMissing, isTenantAdmin } = require('../utils/access');
 
 const router = express.Router();
 
@@ -9,7 +9,15 @@ const normalizeUser = (user) => user.toJSON();
 
 const findAdminParty = async (adminId, partyId, businessOwnerId) => {
   if (!partyId) return null;
-  return Party.findOne({ _id: partyId, userId: adminId, businessOwnerId });
+  const party = await Party.findOne({ _id: partyId, userId: adminId });
+  if (!party) return null;
+  const partyBiz = party.businessOwnerId != null ? String(party.businessOwnerId) : '';
+  const reqBiz =
+    businessOwnerId != null && String(businessOwnerId).trim() !== '' ? String(businessOwnerId).trim() : '';
+  if (partyBiz && reqBiz && partyBiz !== reqBiz) {
+    return null;
+  }
+  return party;
 };
 
 router.get('/', async (req, res) => {
@@ -70,7 +78,7 @@ router.get('/pending', async (req, res) => {
   }
 });
 
-router.patch('/:id/approve', resolveBusinessOwner, async (req, res) => {
+router.patch('/:id/approve', resolveBusinessOwnerAllowMissing, async (req, res) => {
   try {
     if (!isTenantAdmin(req.user)) {
       return res.status(403).json({ message: 'Business admin access required' });
@@ -105,7 +113,7 @@ router.patch('/:id/approve', resolveBusinessOwner, async (req, res) => {
     user.ownerId = req.user._id;
     user.partyId = String(linkedParty._id);
     user.partyName = linkedParty.name;
-    user.businessOwnerId = req.businessOwnerId;
+    user.businessOwnerId = req.businessOwnerId != null ? String(req.businessOwnerId) : '';
     user.pendingForAdminId = null;
     user.approvedBy = req.user._id;
     user.approvedAt = new Date();

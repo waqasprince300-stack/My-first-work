@@ -7,7 +7,7 @@ const connectDB = require('./config/db');
 const errorHandler = require('./middleware/errorHandler');
 const authenticate = require('./middleware/auth');
 const { requireApproved, requireTenantAdmin, requireSuperAdmin } = require('./middleware/auth');
-const { resolveBusinessOwner } = require('./utils/access');
+const { resolveBusinessOwner, resolveBusinessOwnerAllowMissing } = require('./utils/access');
 
 // Import routes
 const collectionsRouter = require('./routes/collections');
@@ -77,8 +77,9 @@ app.use(cors({
 app.options('*', cors());
 
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+/** Party ledger receipts are stored as base64 in JSON; default 100kb limit causes HTTP 413. */
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '3mb' }));
+app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || '3mb' }));
 
 
 // ✅ Socket.io connection handler
@@ -111,7 +112,7 @@ app.use('/api/approvals/users', authenticate, requireApproved, usersRouter);
 app.use('/api/super-admin', authenticate, requireApproved, requireSuperAdmin, superAdminRouter);
 app.use('/api/businessOwners', authenticate, requireApproved, requireTenantAdmin, businessOwnersRouter);
 app.use('/api/collections', authenticate, requireApproved, resolveBusinessOwner, collectionsRouter);
-app.use('/api/parties', authenticate, requireApproved, resolveBusinessOwner, partiesRouter);
+app.use('/api/parties', authenticate, requireApproved, resolveBusinessOwnerAllowMissing, partiesRouter);
 app.use('/api/ghausiaLots', authenticate, requireApproved, resolveBusinessOwner, ghausiaLotsRouter);
 app.use('/api/payments', authenticate, requireApproved, resolveBusinessOwner, paymentsRouter);
 app.use('/api/partyLedger', authenticate, requireApproved, resolveBusinessOwner, partyLedgerRouter);

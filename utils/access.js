@@ -156,6 +156,41 @@ const resolveBusinessOwner = async (req, res, next) => {
   }
 };
 
+/**
+ * Tenant admin: same as resolveBusinessOwner when a workspace exists or is requested via header.
+ * If there is no BusinessOwner yet, sets req.businessOwnerId to null and continues (e.g. parties before first workspace).
+ * Party JWT behavior matches resolveBusinessOwner.
+ */
+const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
+  try {
+    const userId = getDataOwnerId(req.user);
+
+    if (isParty(req.user)) {
+      const headerBiz = (req.headers['x-business-owner-id'] || '').toString().trim();
+      req.businessOwnerId =
+        headerBiz || String(req.user.businessOwnerId != null ? req.user.businessOwnerId : '').trim();
+      return next();
+    }
+
+    const requestedOwnerId = req.headers['x-business-owner-id'] || req.query.businessOwnerId;
+    let owner = null;
+
+    if (requestedOwnerId) {
+      owner = await BusinessOwner.findOne({ _id: requestedOwnerId, userId, status: 'active' });
+      if (!owner) {
+        return res.status(404).json({ message: 'Business owner not found' });
+      }
+      req.businessOwnerId = String(owner._id);
+    } else {
+      owner = await ensureDefaultBusinessOwner(req.user);
+      req.businessOwnerId = owner ? String(owner._id) : null;
+    }
+    next();
+  } catch (error) {
+    res.status(500).json({ message: 'Error resolving business owner', error: error.message });
+  }
+};
+
 const requireAdminUser = (req, res) => {
   if (!isTenantAdmin(req.user)) {
     res.status(403).json({ message: 'Business admin access required' });
@@ -187,5 +222,6 @@ module.exports = {
   isParty,
   requireAdminUser,
   resolveBusinessOwner,
+  resolveBusinessOwnerAllowMissing,
   toObjectId,
 };

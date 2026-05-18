@@ -3,7 +3,8 @@ const router = express.Router();
 const Party = require('../models/Party');
 const { getDataOwnerId, isParty, requireAdminUser } = require('../utils/access');
 
-const stripOwnership = ({ userId, ...data }) => data;
+/** Ignore client-sent tenant fields; server sets userId and businessOwnerId. */
+const stripOwnership = ({ userId, businessOwnerId, ...data }) => data;
 
 // Get all parties
 router.get('/', async (req, res) => {
@@ -38,7 +39,15 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
-    const party = new Party({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
+    const adminUserId = getDataOwnerId(req.user);
+    const bizId = req.businessOwnerId != null && String(req.businessOwnerId).trim() !== ''
+      ? req.businessOwnerId
+      : null;
+    const party = new Party({
+      ...stripOwnership(req.body),
+      userId: adminUserId,
+      ...(bizId ? { businessOwnerId: bizId } : { businessOwnerId: null }),
+    });
     const savedParty = await party.save();
     res.status(201).json(savedParty);
   } catch (error) {
@@ -51,7 +60,7 @@ router.patch('/:id', async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const party = await Party.findOneAndUpdate(
-      { _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId },
+      { _id: req.params.id, userId: getDataOwnerId(req.user) },
       stripOwnership(req.body),
       { new: true, runValidators: true }
     );
@@ -68,7 +77,7 @@ router.patch('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
-    const party = await Party.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
+    const party = await Party.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user) });
     if (!party) {
       return res.status(404).json({ message: 'Party not found' });
     }

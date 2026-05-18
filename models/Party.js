@@ -10,7 +10,8 @@ const partySchema = new mongoose.Schema({
   businessOwnerId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'BusinessOwner',
-    required: true,
+    required: false,
+    default: null,
     index: true,
   },
   name: {
