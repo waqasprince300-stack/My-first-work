@@ -3,6 +3,7 @@ const router = express.Router();
 const Payment = require('../models/Payment');
 const Party = require('../models/Party');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyPaymentOrConditions, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 const stripOwnership = ({ userId, ...data }) => data;
@@ -43,8 +44,37 @@ router.get('/', async (req, res) => {
       filter = { ...getOwnerFilter(req), ...getBusinessOwnerFilter(req) };
     }
 
-    const payments = await Payment.find(filter).sort({ createdAt: -1 });
-    res.json(payments.map(normalize));
+    const typeQ = String(req.query.type || '').trim();
+    if (typeQ) filter.type = typeQ;
+
+    const bizOwnerQ = String(req.query.businessOwnerId || '').trim();
+    if (bizOwnerQ) filter.businessOwnerId = bizOwnerQ;
+
+    const partyKind = String(req.query.partyKind || '').trim().toLowerCase();
+    if (partyKind === 'owner') {
+      filter.party = /^owner$/i;
+    } else if (partyKind === 'nonowner') {
+      filter.party = { $not: /^owner$/i };
+    }
+
+    const pagination = parsePaginationQuery(req);
+    const sort = { createdAt: -1 };
+    if (pagination.paginate) {
+      const [rows, total] = await Promise.all([
+        Payment.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        Payment.countDocuments(filter),
+      ]);
+      return paginatedJson(
+        res,
+        rows.map((doc) => ({ ...doc, id: String(doc._id) })),
+        total,
+        pagination.page,
+        pagination.limit,
+      );
+    }
+
+    const payments = await Payment.find(filter).sort(sort).lean();
+    res.json(payments.map((doc) => ({ ...doc, id: String(doc._id) })));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching payments', error: error.message });
   }

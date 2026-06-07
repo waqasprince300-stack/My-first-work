@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Party = require('../models/Party');
 const { getDataOwnerId, isParty, requireAdminUser } = require('../utils/access');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 /** Ignore client-sent tenant fields; server sets userId and businessOwnerId. */
 const stripOwnership = ({ userId, businessOwnerId, ...data }) => data;
@@ -12,7 +13,17 @@ router.get('/', async (req, res) => {
     const filter = isParty(req.user)
       ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
       : { userId: getDataOwnerId(req.user) };
-    const parties = await Party.find(filter).sort({ name: 1 });
+    const pagination = parsePaginationQuery(req, 8);
+    const sort = { name: 1 };
+    if (pagination.paginate) {
+      const [items, total] = await Promise.all([
+        Party.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        Party.countDocuments(filter),
+      ]);
+      return paginatedJson(res, items, total, pagination.page, pagination.limit);
+    }
+
+    const parties = await Party.find(filter).sort(sort).lean();
     res.json(parties);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching parties', error: error.message });

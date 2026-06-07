@@ -5,6 +5,7 @@ const User = require('../models/User');
 const authenticate = require('../middleware/auth');
 const { getMailConfigError, sendPasswordResetEmail } = require('../utils/email');
 const { getRegistrationEmailError } = require('../utils/registrationEmail');
+const { normalizePhone, validatePhone } = require('../utils/phone');
 
 const router = express.Router();
 
@@ -40,12 +41,24 @@ const sendAuthResponse = (res, statusCode, user, extra = {}) => {
 
 const normalizeSignupRole = (role) => {
   const r = String(role || 'party').toLowerCase();
-  return r === 'admin' ? 'admin' : 'party';
+  if (r === 'admin') return 'admin';
+  if (r === 'personal_khata') return 'personal_khata';
+  return 'party';
 };
 
-const sanitizeUserInput = ({ name, email, password, role, partyId, partyName, adminEmail }) => ({
+const sanitizeUserInput = ({
+  name,
+  email,
+  phone,
+  password,
+  role,
+  partyId,
+  partyName,
+  adminEmail,
+}) => ({
   name: name && name.trim(),
-  email: email && email.trim().toLowerCase(),
+  email: email ? String(email).trim().toLowerCase() : '',
+  phone: normalizePhone(phone),
   password,
   role: normalizeSignupRole(role),
   partyId: partyId ? String(partyId).trim() : '',
@@ -60,11 +73,20 @@ const getFrontendUrl = () => {
     .replace(/\/$/, '');
 };
 
+const duplicateIdentityMessage = (error) => {
+  if (error.code !== 11000) return null;
+  const key = Object.keys(error.keyPattern || error.keyValue || {})[0] || '';
+  if (key.includes('email')) return 'Email is already registered';
+  if (key.includes('phone')) return 'Phone number is already registered';
+  return 'Account already exists';
+};
+
 router.post('/signup', async (req, res) => {
   try {
     const {
       name,
       email,
+      phone,
       password,
       role: requestedRole,
       partyId,
@@ -72,12 +94,72 @@ router.post('/signup', async (req, res) => {
       adminEmail,
     } = sanitizeUserInput(req.body);
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ message: 'Name, email, and password are required' });
+    if (!name || !password) {
+      return res.status(400).json({ message: 'Name and password are required' });
     }
 
     if (password.length < 8) {
       return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+    }
+
+    if (requestedRole === 'personal_khata') {
+      if (!email && !phone) {
+        return res.status(400).json({ message: 'Email or phone number is required' });
+      }
+
+      if (email) {
+        const emailErr = getRegistrationEmailError(email);
+        if (emailErr) {
+          return res.status(400).json({ message: emailErr });
+        }
+      }
+
+      if (phone) {
+        const phoneErr = validatePhone(phone);
+        if (phoneErr) {
+          return res.status(400).json({ message: phoneErr });
+        }
+      }
+
+      if (email) {
+        const existingEmail = await User.findOne({ email });
+        if (existingEmail) {
+          return res.status(409).json({ message: 'Email is already registered' });
+        }
+      }
+
+      if (phone) {
+        const existingPhone = await User.findOne({ phone });
+        if (existingPhone) {
+          return res.status(409).json({ message: 'Phone number is already registered' });
+        }
+      }
+
+      const userPayload = {
+        name,
+        password,
+        role: 'personal_khata',
+        status: 'approved',
+        partyId: '',
+        partyName: '',
+      };
+
+      if (email) userPayload.email = email;
+      if (phone) userPayload.phone = phone;
+
+      const user = await User.create(userPayload);
+      user.ownerId = user._id;
+      user.approvedBy = user._id;
+      user.approvedAt = new Date();
+      await user.save({ validateBeforeSave: false });
+
+      return sendAuthResponse(res, 201, user, {
+        message: 'Personal Khata account created. You are now signed in.',
+      });
+    }
+
+    if (!email) {
+      return res.status(400).json({ message: 'Name, email, and password are required' });
     }
 
     const emailErr = getRegistrationEmailError(email);
@@ -149,7 +231,6 @@ router.post('/signup', async (req, res) => {
       });
     }
 
-    // Party user — must target an approved business admin
     if (!adminEmail) {
       return res.status(400).json({
         message: 'Provide the email of the business administrator you are requesting to join.',
@@ -184,8 +265,9 @@ router.post('/signup', async (req, res) => {
       user,
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({ message: 'Email is already registered' });
+    const dupMsg = duplicateIdentityMessage(error);
+    if (dupMsg) {
+      return res.status(409).json({ message: dupMsg });
     }
 
     res.status(400).json({ message: 'Error creating user', error: error.message });
@@ -195,28 +277,43 @@ router.post('/signup', async (req, res) => {
 router.post('/login', async (req, res) => {
   try {
     const email = req.body.email && req.body.email.trim().toLowerCase();
+    const phone = normalizePhone(req.body.phone);
     const { password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({ message: 'Email and password are required' });
+    if ((!email && !phone) || !password) {
+      return res.status(400).json({ message: 'Email or phone and password are required' });
     }
 
-    const emailErr = getRegistrationEmailError(email);
-    if (emailErr) {
-      return res.status(400).json({ message: emailErr });
+    if (email) {
+      const emailErr = getRegistrationEmailError(email);
+      if (emailErr) {
+        return res.status(400).json({ message: emailErr });
+      }
     }
 
-    const user = await User.findOne({ email }).select('+password');
+    if (phone) {
+      const phoneErr = validatePhone(phone);
+      if (phoneErr) {
+        return res.status(400).json({ message: phoneErr });
+      }
+    }
+
+    const user = phone
+      ? await User.findOne({ phone }).select('+password')
+      : await User.findOne({ email }).select('+password');
 
     if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ message: 'Invalid email or password' });
+      const label = phone ? 'phone number' : 'email';
+      return res.status(401).json({ message: `Invalid ${label} or password` });
     }
 
     if (user.status !== 'approved') {
       const pendingMsg =
         user.role === 'admin'
           ? 'Your administrator account is waiting for approval by the platform super administrator. Try again after you are verified.'
-          : 'Your account is waiting for business administrator approval';
+          : user.role === 'personal_khata'
+            ? 'Your Personal Khata account is not active yet.'
+            : 'Your account is waiting for business administrator approval';
 
       const messages = {
         pending: pendingMsg,
@@ -243,22 +340,42 @@ router.get('/me', authenticate, async (req, res) => {
 router.post('/forgot-password', async (req, res) => {
   try {
     const email = req.body.email && req.body.email.trim().toLowerCase();
+    const phone = normalizePhone(req.body.phone);
 
-    if (!email) {
-      return res.status(400).json({ message: 'Email is required' });
+    if (!email && !phone) {
+      return res.status(400).json({ message: 'Email or phone number is required' });
     }
 
-    const emailErr = getRegistrationEmailError(email);
-    if (emailErr) {
-      return res.status(400).json({ message: emailErr });
+    if (email) {
+      const emailErr = getRegistrationEmailError(email);
+      if (emailErr) {
+        return res.status(400).json({ message: emailErr });
+      }
     }
 
-    const user = await User.findOne({ email }).select('+passwordResetToken +passwordResetExpires');
+    if (phone) {
+      const phoneErr = validatePhone(phone);
+      if (phoneErr) {
+        return res.status(400).json({ message: phoneErr });
+      }
+    }
+
+    const user = phone
+      ? await User.findOne({ phone }).select('+passwordResetToken +passwordResetExpires')
+      : await User.findOne({ email }).select('+passwordResetToken +passwordResetExpires');
 
     if (!user) {
       return res.json({
         message:
-          'If that email is registered, a reset link has been sent. Check your inbox and spam folder.',
+          'If that account is registered, a reset link has been sent. Check your inbox and spam folder.',
+      });
+    }
+
+    if (!user.email) {
+      return res.status(400).json({
+        message:
+          'This account has no email address on file. Password reset is only available for accounts registered with email. Register again with email or contact support.',
+        code: 'NO_EMAIL_ON_ACCOUNT',
       });
     }
 
@@ -304,11 +421,9 @@ router.post('/forgot-password', async (req, res) => {
       });
     }
 
-    const response = {
-      message: 'If that email is registered, a reset link has been sent. Check your inbox and spam folder.',
-    };
-
-    res.json(response);
+    res.json({
+      message: 'If that account is registered, a reset link has been sent. Check your inbox and spam folder.',
+    });
   } catch (error) {
     res.status(500).json({ message: 'Error generating password reset token', error: error.message });
   }
@@ -345,11 +460,15 @@ router.patch('/reset-password/:token', async (req, res) => {
       const msg =
         user.role === 'admin'
           ? 'Password updated. You can sign in after the platform super administrator approves your account.'
-          : 'Password reset successfully. You can sign in after your business administrator approves your account.';
+          : user.role === 'personal_khata'
+            ? 'Password updated. You can sign in with your new password.'
+            : 'Password reset successfully. You can sign in after your business administrator approves your account.';
       return res.json({ message: msg, user });
     }
 
-    sendAuthResponse(res, 200, user);
+    sendAuthResponse(res, 200, user, {
+      message: 'Password updated successfully.',
+    });
   } catch (error) {
     res.status(500).json({ message: 'Error resetting password', error: error.message });
   }

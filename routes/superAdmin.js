@@ -1,14 +1,33 @@
 const express = require('express');
 const User = require('../models/User');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const router = express.Router();
 
 /** All org admins (every status) — audit log; approved rows are not removed. */
 async function listAllOrganizationAdmins(req, res) {
   try {
-    const admins = await User.find({ role: 'admin' })
-      .sort({ createdAt: -1 })
-      .select('-password -passwordResetToken -passwordResetExpires')
+    const filter = { role: 'admin' };
+    const pagination = parsePaginationQuery(req);
+    const sort = { createdAt: -1 };
+    const projection = '-password -passwordResetToken -passwordResetExpires';
+    if (pagination.paginate) {
+      const [rows, total] = await Promise.all([
+        User.find(filter)
+          .sort(sort)
+          .select(projection)
+          .populate('approvedBy', 'name email')
+          .skip(pagination.skip)
+          .limit(pagination.limit)
+          .lean(),
+        User.countDocuments(filter),
+      ]);
+      return paginatedJson(res, rows, total, pagination.page, pagination.limit);
+    }
+
+    const admins = await User.find(filter)
+      .sort(sort)
+      .select(projection)
       .populate('approvedBy', 'name email')
       .lean();
 

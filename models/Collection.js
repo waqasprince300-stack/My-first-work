@@ -59,4 +59,6 @@ const collectionSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+collectionSchema.index({ userId: 1, businessOwnerId: 1, date: -1 });
+
 module.exports = mongoose.model('Collection', collectionSchema);

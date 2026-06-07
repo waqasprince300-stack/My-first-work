@@ -10,10 +10,17 @@ const userSchema = new mongoose.Schema({
   },
   email: {
     type: String,
-    required: true,
-    unique: true,
     trim: true,
     lowercase: true,
+    sparse: true,
+    unique: true,
+  },
+  phone: {
+    type: String,
+    trim: true,
+    sparse: true,
+    unique: true,
+    index: true,
   },
   password: {
     type: String,
@@ -23,7 +30,7 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['super_admin', 'admin', 'party'],
+    enum: ['super_admin', 'admin', 'party', 'personal_khata'],
     default: 'party',
   },
   status: {
@@ -83,6 +90,21 @@ const userSchema = new mongoose.Schema({
   },
 }, {
   timestamps: true,
+});
+
+userSchema.pre('validate', function requireIdentity(next) {
+  const hasEmail = Boolean(this.email && String(this.email).trim());
+  const hasPhone = Boolean(this.phone && String(this.phone).trim());
+
+  if (this.role === 'personal_khata') {
+    if (!hasEmail && !hasPhone) {
+      this.invalidate('email', 'Email or phone is required for Personal Khata accounts');
+    }
+  } else if (!hasEmail) {
+    this.invalidate('email', 'Email is required');
+  }
+
+  next();
 });
 
 userSchema.pre('save', async function hashPassword(next) {

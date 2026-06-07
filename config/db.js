@@ -14,6 +14,8 @@ const connectOpts = () =>
   getMongooseConnectOptions({
     serverSelectionTimeoutMS: 45_000,
     socketTimeoutMS: 45_000,
+    maxPoolSize: 20,
+    minPoolSize: 2,
   });
 
 const wireEvents = () => {

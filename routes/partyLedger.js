@@ -10,12 +10,18 @@ router.get('/', async (req, res) => {
   try {
     const { partyId } = req.query;
     let query = getScopedFilter(req);
-    
+
     if (partyId && !isParty(req.user)) {
       query.partyId = partyId;
     }
-    
-    const ledger = await PartyLedger.find(query).sort({ date: -1 });
+
+    const includeReceipts =
+      String(req.query.includeReceipts || '').toLowerCase() === '1'
+      || req.query.includeReceipts === 'true';
+
+    let ledgerQuery = PartyLedger.find(query).sort({ completeDate: -1, updatedAt: -1 });
+    if (!includeReceipts) ledgerQuery = ledgerQuery.select('-receipt');
+    const ledger = await ledgerQuery.lean();
     res.json(ledger);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching ledger', error: error.message });

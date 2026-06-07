@@ -1,5 +1,22 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const { getCached, setCached } = require('../utils/requestCache');
+
+const AUTH_USER_CACHE = 'authUser';
+const AUTH_USER_TTL_MS = 60_000;
+const AUTH_USER_FIELDS = [
+  'name',
+  'email',
+  'phone',
+  'role',
+  'status',
+  'partyId',
+  'partyName',
+  'ownerId',
+  'approvedBy',
+  'businessOwnerId',
+  'pendingForAdminId',
+];
 
 const getJwtSecret = () => {
   if (process.env.JWT_SECRET) {
@@ -23,7 +40,17 @@ const authenticate = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, getJwtSecret());
-    const user = await User.findById(decoded.id);
+    const userId = String(decoded.id || '');
+    let user = getCached(AUTH_USER_CACHE, userId);
+
+    if (!user) {
+      user = await User.findById(decoded.id)
+        .select(AUTH_USER_FIELDS.join(' '))
+        .lean();
+      if (user) {
+        setCached(AUTH_USER_CACHE, userId, user, AUTH_USER_TTL_MS);
+      }
+    }
 
     if (!user) {
       return res.status(401).json({ message: 'User no longer exists' });

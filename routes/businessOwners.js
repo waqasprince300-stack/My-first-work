@@ -22,8 +22,10 @@ router.get('/', async (req, res) => {
     const owners = await BusinessOwner.find({
       userId: getDataOwnerId(req.user),
       status: 'active',
-    }).sort({ isDefault: -1, createdAt: 1 });
-    res.json(owners.map(normalize));
+    })
+      .sort({ isDefault: -1, createdAt: 1 })
+      .lean();
+    res.json(owners.map((doc) => ({ ...doc, id: String(doc._id) })));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching business owners', error: error.message });
   }

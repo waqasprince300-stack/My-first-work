@@ -90,4 +90,8 @@ const partyLedgerSchema = new mongoose.Schema({
   timestamps: true,
 });
 
+partyLedgerSchema.index({ userId: 1, businessOwnerId: 1, partyId: 1 });
+partyLedgerSchema.index({ userId: 1, businessOwnerId: 1, lotId: 1 });
+partyLedgerSchema.index({ userId: 1, businessOwnerId: 1, completeDate: -1 });
+
 module.exports = mongoose.model('PartyLedger', partyLedgerSchema);

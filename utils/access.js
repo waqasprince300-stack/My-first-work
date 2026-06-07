@@ -1,5 +1,9 @@
 const mongoose = require('mongoose');
 const BusinessOwner = require('../models/BusinessOwner');
+const { getCached, setCached } = require('./requestCache');
+
+const BUSINESS_OWNER_CACHE = 'businessOwner';
+const BUSINESS_OWNER_TTL_MS = 30_000;
 
 const isTenantAdmin = (user) => user?.role === 'admin';
 const isParty = (user) => user?.role === 'party';
@@ -71,16 +75,27 @@ const getPartyAccessibleLotFilter = (user, extra = {}) => ({
   ...extra,
 });
 
+/**
+ * One-time legacy backfill guard. The businessOwnerId migration only needs to run once per
+ * tenant; after that we skip the heavy 9-collection scan so it never sits in the per-request path.
+ */
+const legacyMigrationDone = new Set();
+
 const ensureDefaultBusinessOwner = async (user) => {
   const userId = getDataOwnerId(user);
-  let owner = await BusinessOwner.findOne({ userId, isDefault: true });
+  let owner = await BusinessOwner.findOne({ userId, isDefault: true }).lean();
 
   if (!owner) {
-    owner = await BusinessOwner.findOne({ userId }).sort({ createdAt: 1 });
+    owner = await BusinessOwner.findOne({ userId }).sort({ createdAt: 1 }).lean();
   }
 
   if (!owner) {
     return null;
+  }
+
+  // Migration already applied for this tenant in this process — skip the expensive scans.
+  if (legacyMigrationDone.has(String(userId))) {
+    return owner;
   }
 
   const missingOwnerFilter = {
@@ -102,20 +117,31 @@ const ensureDefaultBusinessOwner = async (user) => {
     require('../models/SavedDesign'),
   ];
 
-  await Promise.all(models.map((Model) => Model.updateMany(missingOwnerFilter, ownerUpdate)));
+  const migrationChecks = await Promise.all(
+    models.map((Model) => Model.exists(missingOwnerFilter)),
+  );
+  if (migrationChecks.some(Boolean)) {
+    await Promise.all(models.map((Model) => Model.updateMany(missingOwnerFilter, ownerUpdate)));
+  }
 
   // Legacy rows may have businessOwnerId stored as "" — bypass Mongoose schema casting for this match
   const uid = userId instanceof mongoose.Types.ObjectId ? userId : new mongoose.Types.ObjectId(userId);
   const ownerId = owner._id instanceof mongoose.Types.ObjectId ? owner._id : new mongoose.Types.ObjectId(owner._id);
-  await Promise.all(
-    models.map((Model) =>
-      Model.collection.updateMany(
-        { userId: uid, businessOwnerId: '' },
-        { $set: { businessOwnerId: ownerId } },
-      ),
-    ),
+  const legacyChecks = await Promise.all(
+    models.map((Model) => Model.collection.findOne({ userId: uid, businessOwnerId: '' }, { projection: { _id: 1 } })),
   );
+  if (legacyChecks.some(Boolean)) {
+    await Promise.all(
+      models.map((Model) =>
+        Model.collection.updateMany(
+          { userId: uid, businessOwnerId: '' },
+          { $set: { businessOwnerId: ownerId } },
+        ),
+      ),
+    );
+  }
 
+  legacyMigrationDone.add(String(userId));
   return owner;
 };
 
@@ -134,12 +160,22 @@ const resolveBusinessOwner = async (req, res, next) => {
     let owner = null;
 
     if (requestedOwnerId) {
-      owner = await BusinessOwner.findOne({ _id: requestedOwnerId, userId, status: 'active' });
+      const cacheKey = `${userId}:${requestedOwnerId}`;
+      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+      if (!owner) {
+        owner = await BusinessOwner.findOne({ _id: requestedOwnerId, userId, status: 'active' }).lean();
+        if (owner) setCached(BUSINESS_OWNER_CACHE, cacheKey, owner, BUSINESS_OWNER_TTL_MS);
+      }
       if (!owner) {
         return res.status(404).json({ message: 'Business owner not found' });
       }
     } else {
-      owner = await ensureDefaultBusinessOwner(req.user);
+      const cacheKey = `${userId}:default`;
+      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+      if (!owner) {
+        owner = await ensureDefaultBusinessOwner(req.user);
+        if (owner) setCached(BUSINESS_OWNER_CACHE, cacheKey, owner, BUSINESS_OWNER_TTL_MS);
+      }
       if (!owner) {
         return res.status(400).json({
           message:
@@ -176,13 +212,23 @@ const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
     let owner = null;
 
     if (requestedOwnerId) {
-      owner = await BusinessOwner.findOne({ _id: requestedOwnerId, userId, status: 'active' });
+      const cacheKey = `${userId}:${requestedOwnerId}`;
+      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+      if (!owner) {
+        owner = await BusinessOwner.findOne({ _id: requestedOwnerId, userId, status: 'active' }).lean();
+        if (owner) setCached(BUSINESS_OWNER_CACHE, cacheKey, owner, BUSINESS_OWNER_TTL_MS);
+      }
       if (!owner) {
         return res.status(404).json({ message: 'Business owner not found' });
       }
       req.businessOwnerId = String(owner._id);
     } else {
-      owner = await ensureDefaultBusinessOwner(req.user);
+      const cacheKey = `${userId}:default`;
+      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+      if (!owner) {
+        owner = await ensureDefaultBusinessOwner(req.user);
+        if (owner) setCached(BUSINESS_OWNER_CACHE, cacheKey, owner, BUSINESS_OWNER_TTL_MS);
+      }
       req.businessOwnerId = owner ? String(owner._id) : null;
     }
     next();

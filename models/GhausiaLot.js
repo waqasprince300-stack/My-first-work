@@ -166,5 +166,9 @@ ghausiaLotSchema.index(
     partialFilterExpression: { lotNumber: { $exists: true, $type: 'string', $gt: '' } },
   },
 );
+ghausiaLotSchema.index({ userId: 1, businessOwnerId: 1, receivedDate: -1 });
+ghausiaLotSchema.index({ userId: 1, partyId: 1 });
+ghausiaLotSchema.index({ userId: 1, receivedDate: -1 });
+ghausiaLotSchema.index({ userId: 1, businessOwnerId: 1, status: 1, receivedDate: -1 });
 
 module.exports = mongoose.model('GhausiaLot', ghausiaLotSchema);

@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const compression = require('compression');
 const cors = require('cors');
 const http = require('http');
 const socketIO = require('socket.io');
@@ -23,6 +24,8 @@ const dashboardRouter = require('./routes/dashboard');
 const usersRouter = require('./routes/users');
 const superAdminRouter = require('./routes/superAdmin');
 const businessOwnersRouter = require('./routes/businessOwners');
+const personalKhataRouter = require('./routes/personalKhata');
+const bootstrapRouter = require('./routes/bootstrap');
 
 const app = express();
 const server = http.createServer(app);
@@ -52,6 +55,8 @@ const io = socketIO(server, {
   }
 });
 
+
+app.use(compression());
 
 // ✅ CORS Middleware (IMPORTANT)
 app.use(cors({
@@ -120,6 +125,8 @@ app.use('/api/partyEdits', authenticate, requireApproved, resolveBusinessOwner, 
 app.use('/api/rateCalculations', authenticate, requireApproved, resolveBusinessOwner, rateCalculationsRouter);
 app.use('/api/savedDesigns', authenticate, requireApproved, resolveBusinessOwner, savedDesignsRouter);
 app.use('/api/dashboard', authenticate, requireApproved, resolveBusinessOwner, dashboardRouter);
+app.use('/api/personal-khata', authenticate, requireApproved, personalKhataRouter);
+app.use('/api/bootstrap', authenticate, requireApproved, resolveBusinessOwnerAllowMissing, bootstrapRouter);
 
 
 // ✅ Health check

@@ -5,6 +5,7 @@ const Party = require('../models/Party');
 const PartyLedger = require('../models/PartyLedger');
 const PartyEdit = require('../models/PartyEdit');
 const { getDataOwnerId, getScopedFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, escapeRegexString, isParty, requireAdminUser, isTenantAdmin, toObjectId } = require('../utils/access');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const stripOwnership = ({ userId, ...data }) => data;
 const partyEditableLotFields = new Set(['status', 'dispatchDate', 'receivedBackDate']);
@@ -222,9 +223,23 @@ router.get('/', async (req, res) => {
     } else {
       filter = getScopedFilter(req);
     }
-    const lots = await GhausiaLot.find(filter)
-      .sort({ receivedDate: -1 })
-      .populate('businessOwnerId', 'name');
+
+    const statusQ = String(req.query.status || '').trim();
+    if (statusQ) {
+      filter.status = new RegExp(`^${escapeRegexString(statusQ)}$`, 'i');
+    }
+
+    const pagination = parsePaginationQuery(req);
+    const sort = { receivedDate: -1 };
+    if (pagination.paginate) {
+      const [items, total] = await Promise.all([
+        GhausiaLot.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        GhausiaLot.countDocuments(filter),
+      ]);
+      return paginatedJson(res, items, total, pagination.page, pagination.limit);
+    }
+
+    const lots = await GhausiaLot.find(filter).sort(sort).lean();
     res.json(lots);
   } catch (error) {
     res.status(500).json({ message: 'Error fetching lots', error: error.message });
@@ -260,6 +275,12 @@ router.post('/:id/approve-completion', async (req, res) => {
     const partyBill = Number(peDoc?.partyBillAmount ?? 0);
     if (ownerBillingChoice === 'sync_party') {
       lot.billAmount = partyBill;
+    } else if (ownerBillingChoice === 'custom_ghausia') {
+      const custom = Number(req.body?.ownerBillAmount);
+      if (Number.isFinite(custom) && custom >= 0) {
+        lot.billAmount = custom;
+        lot.totalAmount = custom;
+      }
     } else if (ownerBillingChoice === 'delta_only' && peDoc?.pendingRevision) {
       const fromA = Number(peDoc.pendingRevision.fromAmount ?? 0);
       const toA = Number(peDoc.pendingRevision.toAmount ?? 0);

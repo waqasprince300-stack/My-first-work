@@ -3,6 +3,7 @@ const router = express.Router();
 const PartyEdit = require('../models/PartyEdit');
 const GhausiaLot = require('../models/GhausiaLot');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const stripOwnership = ({ userId, ...data }) => data;
 
@@ -11,7 +12,9 @@ const getAllowedPartyLotIds = async (req) => {
   const lots = await GhausiaLot.find({
     userId: getDataOwnerId(req.user),
     partyId: String(req.user.partyId || ''),
-  }).select('_id');
+  })
+    .select('_id')
+    .lean();
   return lots.map((lot) => String(lot._id));
 };
 
@@ -21,7 +24,9 @@ router.get('/', async (req, res) => {
     const partyLedgerAll = String(req.query.partyScope || '').toLowerCase() === 'all' && isParty(req.user);
     let allowedLotIds = null;
     if (partyLedgerAll) {
-      const lots = await GhausiaLot.find(getPartyAllBusinessLotsFilter(req.user)).select('_id');
+      const lots = await GhausiaLot.find(getPartyAllBusinessLotsFilter(req.user))
+        .select('_id')
+        .lean();
       allowedLotIds = lots.map((lot) => String(lot._id));
     } else if (isParty(req.user)) {
       allowedLotIds = await getAllowedPartyLotIds(req);
@@ -35,8 +40,32 @@ router.get('/', async (req, res) => {
       ...bizFilter,
       ...(allowedLotIds !== null ? { lotId: { $in: allowedLotIds } } : {}),
     };
-    const partyEdits = await PartyEdit.find(filter).sort({ createdAt: -1 });
-    res.json(partyEdits.map(p => ({ ...p.toObject(), id: p._id.toString() })));
+    const includeReceipts =
+      String(req.query.includeReceipts || '').toLowerCase() === '1'
+      || req.query.includeReceipts === 'true';
+    const pagination = parsePaginationQuery(req);
+    let query = PartyEdit.find(filter).sort({ createdAt: -1 });
+    if (!includeReceipts) query = query.select('-receipt');
+    if (pagination.paginate) {
+      const [rows, total] = await Promise.all([
+        PartyEdit.find(filter)
+          .sort({ createdAt: -1 })
+          .select(includeReceipts ? undefined : '-receipt')
+          .skip(pagination.skip)
+          .limit(pagination.limit)
+          .lean(),
+        PartyEdit.countDocuments(filter),
+      ]);
+      return paginatedJson(
+        res,
+        rows.map((p) => ({ ...p, id: String(p._id) })),
+        total,
+        pagination.page,
+        pagination.limit,
+      );
+    }
+    const partyEdits = await query.lean();
+    res.json(partyEdits.map((p) => ({ ...p, id: String(p._id) })));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching party edits', error: error.message });
   }
@@ -118,6 +147,10 @@ router.put('/lot/:lotId', async (req, res) => {
     if (Object.prototype.hasOwnProperty.call(data, 'pendingRevision') && data.pendingRevision === null) {
       unset.pendingRevision = '';
       delete data.pendingRevision;
+    }
+    if (Object.prototype.hasOwnProperty.call(data, 'billRevisionRequest') && data.billRevisionRequest === null) {
+      unset.billRevisionRequest = '';
+      delete data.billRevisionRequest;
     }
     const update =
       Object.keys(unset).length > 0

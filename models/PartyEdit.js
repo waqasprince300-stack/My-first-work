@@ -47,6 +47,11 @@ const partyEditSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.Mixed,
     default: null,
   },
+  /** Party-initiated bill-change request on an already approved/completed lot — admin approves to apply */
+  billRevisionRequest: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
   allotDate: {
     type: Date,
     default: null,
@@ -54,5 +59,10 @@ const partyEditSchema = new mongoose.Schema({
 }, {
   timestamps: true,
 });
+
+partyEditSchema.index({ userId: 1, businessOwnerId: 1, lotId: 1 });
+partyEditSchema.index({ userId: 1, lotId: 1 });
+partyEditSchema.index({ userId: 1, businessOwnerId: 1, createdAt: -1 });
+partyEditSchema.index({ userId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('PartyEdit', partyEditSchema);

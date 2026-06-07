@@ -2,6 +2,7 @@ const express = require('express');
 const User = require('../models/User');
 const Party = require('../models/Party');
 const { resolveBusinessOwnerAllowMissing, isTenantAdmin } = require('../utils/access');
+const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const router = express.Router();
 
@@ -26,7 +27,7 @@ router.get('/', async (req, res) => {
       return res.status(403).json({ message: 'Business admin access required' });
     }
 
-    const users = await User.find({
+    const filter = {
       _id: { $ne: req.user._id },
       $or: [
         {
@@ -36,8 +37,24 @@ router.get('/', async (req, res) => {
         },
         { ownerId: req.user._id },
       ],
-    }).sort({ createdAt: -1 });
+    };
+    const pagination = parsePaginationQuery(req);
+    const sort = { createdAt: -1 };
+    if (pagination.paginate) {
+      const [rows, total] = await Promise.all([
+        User.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit),
+        User.countDocuments(filter),
+      ]);
+      return paginatedJson(
+        res,
+        rows.map(normalizeUser),
+        total,
+        pagination.page,
+        pagination.limit,
+      );
+    }
 
+    const users = await User.find(filter).sort(sort);
     res.json(users.map(normalizeUser));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching users', error: error.message });
@@ -189,6 +206,85 @@ router.patch('/:id/disable', async (req, res) => {
     res.json(normalizeUser(user));
   } catch (error) {
     res.status(400).json({ message: 'Error disabling user', error: error.message });
+  }
+});
+
+router.patch('/:id/enable', async (req, res) => {
+  try {
+    if (!isTenantAdmin(req.user)) {
+      return res.status(403).json({ message: 'Business admin access required' });
+    }
+
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (String(user._id) === String(req.user._id)) {
+      return res.status(400).json({ message: 'You cannot change your own account here' });
+    }
+
+    if (user.role !== 'party' || String(user.ownerId) !== String(req.user._id)) {
+      return res.status(403).json({ message: 'You can only manage party users in your organization' });
+    }
+
+    if (user.status !== 'disabled') {
+      return res.status(400).json({ message: 'Only disabled party users can be re-enabled' });
+    }
+
+    user.status = 'approved';
+    user.disabledAt = null;
+    user.rejectedAt = null;
+    await user.save({ validateBeforeSave: false });
+
+    res.json(normalizeUser(user));
+  } catch (error) {
+    res.status(400).json({ message: 'Error enabling user', error: error.message });
+  }
+});
+
+router.patch('/:id/party', resolveBusinessOwnerAllowMissing, async (req, res) => {
+  try {
+    if (!isTenantAdmin(req.user)) {
+      return res.status(403).json({ message: 'Business admin access required' });
+    }
+
+    const { partyId = '' } = req.body;
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (String(user._id) === String(req.user._id)) {
+      return res.status(400).json({ message: 'You cannot change your own account here' });
+    }
+
+    if (user.role !== 'party' || String(user.ownerId) !== String(req.user._id)) {
+      return res.status(403).json({ message: 'You can only manage party users in your organization' });
+    }
+
+    if (!['approved', 'disabled'].includes(user.status)) {
+      return res.status(400).json({ message: 'Only approved or disabled party users can have their party changed' });
+    }
+
+    const linkedParty = await findAdminParty(req.user._id, partyId, req.businessOwnerId);
+    if (!linkedParty) {
+      return res.status(400).json({ message: 'Select a valid party for this user' });
+    }
+
+    user.partyId = String(linkedParty._id);
+    user.partyName = linkedParty.name;
+    user.businessOwnerId =
+      linkedParty.businessOwnerId != null && String(linkedParty.businessOwnerId).trim() !== ''
+        ? String(linkedParty.businessOwnerId)
+        : (req.businessOwnerId != null ? String(req.businessOwnerId) : user.businessOwnerId);
+    await user.save({ validateBeforeSave: false });
+
+    res.json(normalizeUser(user));
+  } catch (error) {
+    res.status(400).json({ message: 'Error changing party', error: error.message });
   }
 });
 
