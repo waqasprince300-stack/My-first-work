@@ -88,6 +88,19 @@ const userSchema = new mongoose.Schema({
     type: Date,
     select: false,
   },
+  /** Devices that have passed new-device OTP verification (skip OTP on future logins). */
+  knownDevices: {
+    type: [
+      {
+        deviceId: { type: String, required: true },
+        label: { type: String, default: '' },
+        createdAt: { type: Date, default: Date.now },
+        lastSeenAt: { type: Date, default: Date.now },
+      },
+    ],
+    default: [],
+    select: false,
+  },
 }, {
   timestamps: true,
 });
@@ -134,11 +147,31 @@ userSchema.methods.createPasswordResetToken = function createPasswordResetToken(
   return resetToken;
 };
 
+userSchema.methods.hasKnownDevice = function hasKnownDevice(deviceId) {
+  const id = String(deviceId || '').trim();
+  if (!id) return false;
+  return (this.knownDevices || []).some((d) => String(d.deviceId) === id);
+};
+
+userSchema.methods.rememberDevice = function rememberDevice(deviceId, label = '') {
+  const id = String(deviceId || '').trim();
+  if (!id) return;
+  if (!Array.isArray(this.knownDevices)) this.knownDevices = [];
+  const existing = this.knownDevices.find((d) => String(d.deviceId) === id);
+  if (existing) {
+    existing.lastSeenAt = new Date();
+    if (label) existing.label = label;
+  } else {
+    this.knownDevices.push({ deviceId: id, label, createdAt: new Date(), lastSeenAt: new Date() });
+  }
+};
+
 userSchema.methods.toJSON = function toJSON() {
   const user = this.toObject();
   delete user.password;
   delete user.passwordResetToken;
   delete user.passwordResetExpires;
+  delete user.knownDevices;
   return user;
 };
 

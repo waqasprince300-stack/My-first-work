@@ -64,14 +64,17 @@ app.use(cors({
     // allow requests without origin (Postman, mobile apps)
     if (!origin) return callback(null, true);
 
-    // allow all in development OR fallback
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
 
-    // ✅ DO NOT THROW ERROR — just allow temporarily
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('CORS allow (dev):', origin);
+      return callback(null, true);
+    }
+
     console.warn('Blocked by CORS:', origin);
-    return callback(null, true); // 👈 CHANGE THIS LINE
+    return callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true
@@ -95,9 +98,6 @@ io.on('connection', (socket) => {
     console.log('Client disconnected:', socket.id);
   });
 
-  socket.on('data-update', (data) => {
-    io.emit('data-update', data);
-  });
 });
 
 

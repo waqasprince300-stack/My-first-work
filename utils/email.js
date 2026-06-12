@@ -71,7 +71,50 @@ const sendPasswordResetEmail = async ({ to, name, resetUrl }) => {
   });
 };
 
+const OTP_PURPOSE_COPY = {
+  login_device: {
+    subject: 'Your Waqas EMB sign-in code',
+    line: 'Use this code to confirm sign-in from a new device.',
+  },
+  password_reset: {
+    subject: 'Your Waqas EMB password reset code',
+    line: 'Use this code to reset your password.',
+  },
+};
+
+/** Send a one-time verification code (new-device login or password reset). */
+const sendOtpEmail = async ({ to, name, code, purpose, expiryMinutes }) => {
+  const transporter = createTransporter();
+  const from = getEnv('EMAIL_FROM') || getEnv('SMTP_USER');
+  const copy = OTP_PURPOSE_COPY[purpose] || OTP_PURPOSE_COPY.login_device;
+  const minutes = Number(expiryMinutes) || 10;
+
+  await transporter.sendMail({
+    from,
+    to,
+    subject: copy.subject,
+    text: [
+      `Hi ${name || 'there'},`,
+      '',
+      copy.line,
+      '',
+      `Your code: ${code}`,
+      `It expires in ${minutes} minutes.`,
+      '',
+      'If you did not request this, you can ignore this email.',
+    ].join('\n'),
+    html: `
+      <p>Hi ${name || 'there'},</p>
+      <p>${copy.line}</p>
+      <p style="font-size:28px;font-weight:700;letter-spacing:6px;margin:16px 0;">${code}</p>
+      <p>This code expires in ${minutes} minutes.</p>
+      <p>If you did not request this, you can ignore this email.</p>
+    `,
+  });
+};
+
 module.exports = {
   getMailConfigError,
   sendPasswordResetEmail,
+  sendOtpEmail,
 };

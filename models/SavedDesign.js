@@ -20,6 +20,8 @@ const savedDesignSchema = new mongoose.Schema({
   },
   rows: [
     {
+      part: { type: String, default: '' },
+      label: { type: String, default: '' },
       baseStitches: { type: String, default: '' },
       repeat: { type: Number, default: 1 },
     },

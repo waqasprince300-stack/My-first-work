@@ -7,6 +7,26 @@ const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 
 const stripOwnership = ({ userId, ...data }) => data;
 
+const PARTY_EDIT_PATCH_FIELDS = [
+  'completeDate',
+  'partyBillAmount',
+  'receipt',
+  'notes',
+  'overrideStatus',
+  'pendingRevision',
+  'billRevisionRequest',
+  'amountChangeNote',
+  'allotDate',
+];
+
+const pickPartyEditPatch = (body) => {
+  const out = {};
+  for (const key of PARTY_EDIT_PATCH_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) out[key] = body[key];
+  }
+  return out;
+};
+
 const getAllowedPartyLotIds = async (req) => {
   if (!isParty(req.user)) return null;
   const lots = await GhausiaLot.find({
@@ -71,6 +91,60 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Get party edit for a single lot (optional receipt for lazy loading)
+router.get('/lot/:lotId', async (req, res) => {
+  try {
+    const lotIdStr = String(req.params.lotId || '').trim();
+    const userId = getDataOwnerId(req.user);
+    let businessOwnerId = req.businessOwnerId;
+
+    const includeReceipts =
+      String(req.query.includeReceipts || '').toLowerCase() === '1'
+      || req.query.includeReceipts === 'true';
+
+    if (isParty(req.user)) {
+      const lot = await GhausiaLot.findOne(
+        getPartyAccessibleLotFilter(req.user, { _id: lotIdStr }),
+      );
+      if (!lot) {
+        return res.status(404).json({ message: 'Lot not found for this party' });
+      }
+      businessOwnerId = String(lot.businessOwnerId ?? '').trim();
+    } else if (isTenantAdmin(req.user)) {
+      const queryBiz = String(req.query.businessOwnerId || '').trim();
+      if (queryBiz) {
+        businessOwnerId = queryBiz;
+      } else {
+        const lot = await GhausiaLot.findOne({ _id: lotIdStr, userId })
+          .select('businessOwnerId')
+          .lean();
+        if (lot?.businessOwnerId) {
+          businessOwnerId = String(lot.businessOwnerId);
+        }
+      }
+    }
+
+    const receiptSelect = includeReceipts ? undefined : '-receipt';
+    let row = await PartyEdit.findOne({ lotId: lotIdStr, userId, businessOwnerId })
+      .select(receiptSelect)
+      .lean();
+
+    // Admin ledger spans workspaces — fall back if header/workspace id mismatched the lot
+    if (!row && isTenantAdmin(req.user)) {
+      row = await PartyEdit.findOne({ lotId: lotIdStr, userId })
+        .select(receiptSelect)
+        .lean();
+    }
+
+    if (!row) {
+      return res.status(404).json({ message: 'Party edit not found' });
+    }
+    res.json({ ...row, id: String(row._id) });
+  } catch (error) {
+    res.status(500).json({ message: 'Error fetching party edit', error: error.message });
+  }
+});
+
 // Get single party edit
 router.get('/:id', async (req, res) => {
   try {
@@ -113,7 +187,7 @@ router.patch('/:id', async (req, res) => {
         ...getBusinessOwnerFilter(req),
         ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
       },
-      stripOwnership(req.body),
+      stripOwnership(pickPartyEditPatch(req.body)),
       { new: true, runValidators: true }
     );
     if (!partyEdit) {

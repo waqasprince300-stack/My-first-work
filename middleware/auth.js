@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
-const { getCached, setCached } = require('../utils/requestCache');
+const { getCached, setCached, invalidateCached } = require('../utils/requestCache');
 
 const AUTH_USER_CACHE = 'authUser';
 const AUTH_USER_TTL_MS = 60_000;
@@ -92,8 +92,15 @@ const requireSuperAdmin = (req, res, next) => {
 /** @deprecated Use requireTenantAdmin */
 const requireAdmin = requireTenantAdmin;
 
+const invalidateAuthUserCache = (userId) => {
+  if (userId != null && userId !== '') {
+    invalidateCached(AUTH_USER_CACHE, String(userId));
+  }
+};
+
 module.exports = authenticate;
 module.exports.requireApproved = requireApproved;
 module.exports.requireTenantAdmin = requireTenantAdmin;
 module.exports.requireSuperAdmin = requireSuperAdmin;
 module.exports.requireAdmin = requireAdmin;
+module.exports.invalidateAuthUserCache = invalidateAuthUserCache;

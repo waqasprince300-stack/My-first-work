@@ -1,4 +1,5 @@
 const express = require('express');
+const { invalidateAuthUserCache } = require('../middleware/auth');
 const User = require('../models/User');
 const Party = require('../models/Party');
 const { resolveBusinessOwnerAllowMissing, isTenantAdmin } = require('../utils/access');
@@ -202,6 +203,7 @@ router.patch('/:id/disable', async (req, res) => {
     user.status = 'disabled';
     user.disabledAt = new Date();
     await user.save({ validateBeforeSave: false });
+    invalidateAuthUserCache(user._id);
 
     res.json(normalizeUser(user));
   } catch (error) {

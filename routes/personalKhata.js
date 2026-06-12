@@ -53,10 +53,8 @@ const toResponse = (doc) => ({
 
 router.get('/', authenticate, requireApproved, async (req, res) => {
   try {
-    if (req.user.role !== 'personal_khata') {
-      return res.status(403).json({ message: 'Personal Khata access required' });
-    }
-
+    // Every approved account (admin, party, personal_khata) gets its own
+    // server-synced Personal Khata, keyed by user id.
     let doc = await PersonalKhata.findOne({ userId: req.user._id });
 
     if (!doc) {
@@ -75,10 +73,6 @@ router.get('/', authenticate, requireApproved, async (req, res) => {
 
 router.put('/', authenticate, requireApproved, async (req, res) => {
   try {
-    if (req.user.role !== 'personal_khata') {
-      return res.status(403).json({ message: 'Personal Khata access required' });
-    }
-
     const payload = sanitizeKhataPayload(req.body);
 
     const doc = await PersonalKhata.findOneAndUpdate(
