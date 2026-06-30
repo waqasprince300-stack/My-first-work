@@ -1,4 +1,8 @@
 require('dotenv').config();
+// Empty PORT= in .env must not override cPanel's injected PORT or fall back to 3001.
+if (!String(process.env.PORT || '').trim()) {
+  delete process.env.PORT;
+}
 const express = require('express');
 const compression = require('compression');
 const cors = require('cors');
@@ -34,13 +38,25 @@ const server = http.createServer(app);
 // ✅ Allowed origins (FIXED)
 const getAllowedOrigins = () => {
   const corsOrigin =
-    process.env.CORS_ORIGIN || 'https://waqas-emb-fe.vercel.app';
+    process.env.CORS_ORIGIN || 'https://seamandgrace.com';
 
-  if (corsOrigin.includes(',')) {
-    return corsOrigin.split(',').map(origin => origin.trim());
+  const origins = corsOrigin.includes(',')
+    ? corsOrigin.split(',').map((origin) => origin.trim())
+    : [corsOrigin.trim()];
+
+  const frontend = process.env.FRONTEND_URL?.trim();
+  if (frontend) origins.push(frontend);
+
+  // Allow both www and apex when one is configured (e.g. seamandgrace.com ↔ www.seamandgrace.com).
+  for (const origin of [...origins]) {
+    if (origin.startsWith('https://www.')) {
+      origins.push(origin.replace('https://www.', 'https://'));
+    } else if (/^https:\/\/[^/]+$/.test(origin) && !origin.includes('://www.')) {
+      origins.push(origin.replace('https://', 'https://www.'));
+    }
   }
 
-  return [corsOrigin];
+  return [...new Set(origins.filter(Boolean))];
 };
 
 const allowedOrigins = getAllowedOrigins();
@@ -90,14 +106,41 @@ app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '3mb' }));
 app.use(express.urlencoded({ extended: true, limit: process.env.JSON_BODY_LIMIT || '3mb' }));
 
 
+// ✅ Socket.io auth — verify the JWT from the handshake and resolve the org room to join.
+const jwt = require('jsonwebtoken');
+const User = require('./models/User');
+const { getDataOwnerId } = require('./utils/access');
+const { orgRoom } = require('./utils/realtime');
+
+const getSocketJwtSecret = () =>
+  process.env.JWT_SECRET || (process.env.NODE_ENV === 'production' ? null : 'development-jwt-secret-change-me');
+
+io.use(async (socket, next) => {
+  // Auth is best-effort: an unauthenticated socket simply joins no room (receives nothing).
+  try {
+    const token = socket.handshake?.auth?.token || socket.handshake?.query?.token;
+    const secret = getSocketJwtSecret();
+    if (!token || !secret) return next();
+    const decoded = jwt.verify(String(token), secret);
+    const user = await User.findById(decoded.id).select('role ownerId approvedBy status').lean();
+    if (user && user.status === 'approved') {
+      socket.data.ownerId = String(getDataOwnerId(user) || '');
+    }
+  } catch {
+    /* ignore — connect without a room */
+  }
+  next();
+});
+
 // ✅ Socket.io connection handler
 io.on('connection', (socket) => {
-  console.log('New client connected:', socket.id);
+  if (socket.data.ownerId) {
+    socket.join(orgRoom(socket.data.ownerId));
+  }
 
   socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
+    /* room membership is cleaned up automatically */
   });
-
 });
 
 
@@ -145,21 +188,61 @@ app.use((req, res) => {
 app.use(errorHandler);
 
 
-const PORT = process.env.PORT || 3001;
+// cPanel / Namecheap: Phusion Passenger serves module.exports — do not require PORT in production.
+const isPassenger =
+  typeof PhusionPassenger !== 'undefined'
+  || Boolean(process.env.PASSENGER_APP_ENV)
+  || Boolean(process.env.PASSENGER_BASE_URI);
 
+const startServer = async () => {
+  await connectDB();
 
-// ✅ Start server after DB (avoids “running” log before Mongo fails)
-connectDB()
-  .then(() => {
-    server.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-    });
-  })
-  .catch(() => {
-    // connectDB already logged and exits; guard for non-exit edge cases
+  const isProduction = process.env.NODE_ENV === 'production';
+  const explicitPort = process.env.PORT?.trim();
+
+  // Shared hosting (cPanel): Passenger binds the port — never listen(3001) here.
+  if (isProduction && !explicitPort) {
+    if (isPassenger) {
+      server.listen('passenger', () => {
+        console.log('✅ Server running via Phusion Passenger (cPanel)');
+        console.log('Environment: production');
+      });
+    } else {
+      console.log('✅ App ready for cPanel Passenger (export-only — no port bind)');
+      console.log('   Do not use "npm start" on shared hosting.');
+      console.log('   Use cPanel → Setup Node.js App → Restart App.');
+    }
+    return;
+  }
+
+  const PORT = explicitPort ? Number(explicitPort) : 3001;
+  if (!Number.isInteger(PORT) || PORT <= 0) {
+    console.error(`❌ Invalid PORT="${explicitPort}"`);
+    process.exit(1);
+  }
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} already in use (EADDRINUSE).`);
+      console.error('   cPanel: Stop App → wait 15s → Restart App (one instance only).');
+    } else {
+      console.error('❌ Server failed to start:', err.message);
+    }
     process.exit(1);
   });
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  });
+};
+
+// Required for cPanel / Phusion Passenger.
+module.exports = app;
+
+startServer().catch(() => {
+  process.exit(1);
+});
 
 
 // ✅ Graceful shutdown

@@ -12,10 +12,18 @@ const dnsFailure = (msg) => /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i
 
 const connectOpts = () =>
   getMongooseConnectOptions({
-    serverSelectionTimeoutMS: 45_000,
-    socketTimeoutMS: 45_000,
-    maxPoolSize: 20,
-    minPoolSize: 2,
+    // Surface a slow/unreachable cluster quickly instead of hanging the request for 45s.
+    serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || 15_000,
+    socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45_000,
+    connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS) || 15_000,
+    // Shared/free Atlas tiers have low connection limits — a modest pool avoids exhaustion.
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1,
+    // Don't let a request wait forever for a free pooled connection.
+    waitQueueTimeoutMS: Number(process.env.MONGO_WAIT_QUEUE_TIMEOUT_MS) || 15_000,
+    // Auto-retry transient network blips on reads/writes (default true, set explicitly).
+    retryReads: true,
+    retryWrites: true,
   });
 
 const wireEvents = () => {

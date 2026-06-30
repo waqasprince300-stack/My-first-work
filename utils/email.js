@@ -35,14 +35,23 @@ const getMailConfigError = () => {
 const createTransporter = () => {
   ensureMailConfig();
 
+  const port = Number(getEnv('SMTP_PORT')) || 587;
+  const secureEnv = getEnv('SMTP_SECURE').toLowerCase();
+  // Port 465 = implicit TLS (secure). 587/25 = STARTTLS (secure:false). Auto-detect if unset.
+  const secure = secureEnv ? secureEnv === 'true' : port === 465;
+
   return nodemailer.createTransport({
     host: getEnv('SMTP_HOST'),
-    port: Number(getEnv('SMTP_PORT')),
-    secure: getEnv('SMTP_SECURE').toLowerCase() === 'true',
+    port,
+    secure,
     auth: {
       user: getEnv('SMTP_USER'),
       pass: getEnv('SMTP_PASS').replace(/\s+/g, ''),
     },
+    // Fail fast instead of hanging the login/OTP request when the SMTP port is blocked.
+    connectionTimeout: 12_000,
+    greetingTimeout: 8_000,
+    socketTimeout: 15_000,
   });
 };
 

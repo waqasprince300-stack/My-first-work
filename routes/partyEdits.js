@@ -4,6 +4,7 @@ const PartyEdit = require('../models/PartyEdit');
 const GhausiaLot = require('../models/GhausiaLot');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
+const { emitOrgChange } = require('../utils/realtime');
 
 const stripOwnership = ({ userId, ...data }) => data;
 
@@ -129,8 +130,11 @@ router.get('/lot/:lotId', async (req, res) => {
       .select(receiptSelect)
       .lean();
 
-    // Admin ledger spans workspaces — fall back if header/workspace id mismatched the lot
-    if (!row && isTenantAdmin(req.user)) {
+    // Both the admin and the party ledger span multiple workspaces, so a businessOwnerId/header
+    // mismatch (e.g. legacy rows saved with an empty businessOwnerId) must not hide an existing
+    // row. For a party the lot's ownership was already validated above, and `userId` pins the
+    // tenant, so this businessOwnerId-agnostic fallback is safe for party and admin alike.
+    if (!row) {
       row = await PartyEdit.findOne({ lotId: lotIdStr, userId })
         .select(receiptSelect)
         .lean();
@@ -171,6 +175,7 @@ router.post('/', async (req, res) => {
     const partyEdit = new PartyEdit({ ...stripOwnership(req.body), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
     const savedPartyEdit = await partyEdit.save();
     res.status(201).json({ ...savedPartyEdit.toObject(), id: savedPartyEdit._id.toString() });
+    emitOrgChange(req, 'partyEdit', { lotId: String(savedPartyEdit.lotId || '') });
   } catch (error) {
     res.status(400).json({ message: 'Error creating party edit', error: error.message });
   }
@@ -194,6 +199,7 @@ router.patch('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Party edit not found' });
     }
     res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
+    emitOrgChange(req, 'partyEdit', { lotId: String(partyEdit.lotId || '') });
   } catch (error) {
     res.status(400).json({ message: 'Error updating party edit', error: error.message });
   }
@@ -237,6 +243,7 @@ router.put('/lot/:lotId', async (req, res) => {
       { new: true, upsert: true, runValidators: true }
     );
     res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
+    emitOrgChange(req, 'partyEdit', { lotId: String(lotId) });
   } catch (error) {
     res.status(400).json({ message: 'Error upserting party edit', error: error.message });
   }

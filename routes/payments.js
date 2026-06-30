@@ -4,6 +4,7 @@ const Payment = require('../models/Payment');
 const Party = require('../models/Party');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyPaymentOrConditions, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
+const { emitOrgChange } = require('../utils/realtime');
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 const stripOwnership = ({ userId, ...data }) => data;
@@ -113,6 +114,7 @@ router.post('/', async (req, res) => {
     const payment = new Payment({ ...data, userId, businessOwnerId: req.businessOwnerId });
     const saved = await payment.save();
     res.status(201).json(normalize(saved));
+    emitOrgChange(req, 'payment', { paymentId: String(saved._id) });
   } catch (error) {
     res.status(400).json({ message: 'Error creating payment', error: error.message });
   }
@@ -133,6 +135,7 @@ router.patch('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Payment not found' });
     }
     res.json(normalize(payment));
+    emitOrgChange(req, 'payment', { paymentId: String(payment._id) });
   } catch (error) {
     res.status(400).json({ message: 'Error updating payment', error: error.message });
   }
@@ -147,6 +150,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Payment not found' });
     }
     res.json({ message: 'Payment deleted successfully' });
+    emitOrgChange(req, 'payment', { paymentId: String(payment._id) });
   } catch (error) {
     res.status(500).json({ message: 'Error deleting payment', error: error.message });
   }

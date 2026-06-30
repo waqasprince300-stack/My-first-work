@@ -6,6 +6,7 @@ const PartyLedger = require('../models/PartyLedger');
 const PartyEdit = require('../models/PartyEdit');
 const { getDataOwnerId, getScopedFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, escapeRegexString, isParty, requireAdminUser, isTenantAdmin, toObjectId } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
+const { emitOrgChange } = require('../utils/realtime');
 
 const stripOwnership = ({ userId, ...data }) => data;
 const partyEditableLotFields = new Set(['status', 'dispatchDate', 'receivedBackDate']);
@@ -313,6 +314,7 @@ router.post('/:id/approve-completion', async (req, res) => {
 
     await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
     res.json(lot);
+    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
   } catch (error) {
     res.status(400).json({ message: 'Could not approve lot', error: error.message });
   }
@@ -364,6 +366,7 @@ router.post('/:id/reject-completion', async (req, res) => {
 
     await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
     res.json(lot);
+    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
   } catch (error) {
     res.status(400).json({ message: 'Could not reject lot', error: error.message });
   }
@@ -397,6 +400,7 @@ router.post('/', async (req, res) => {
     const savedLot = await lot.save();
     await syncPartyLedgerForLot(savedLot, userId, req.businessOwnerId);
     res.status(201).json(savedLot);
+    emitOrgChange(req, 'lot', { lotId: String(savedLot._id) });
   } catch (error) {
     if (error.code === 'DUPLICATE_LOT_NUMBER') {
       return res.status(409).json({ message: error.message });
@@ -491,6 +495,7 @@ router.patch('/:id', async (req, res) => {
       lot.businessOwnerId,
     );
     res.json(lot);
+    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
   } catch (error) {
     if (error.code === 'DUPLICATE_LOT_NUMBER') {
       return res.status(409).json({ message: error.message });
@@ -511,6 +516,7 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Lot not found' });
     }
     res.json({ message: 'Lot deleted successfully' });
+    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
   } catch (error) {
     res.status(500).json({ message: 'Error deleting lot', error: error.message });
   }

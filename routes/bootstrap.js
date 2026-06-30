@@ -87,7 +87,24 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
   let query = PartyEdit.find(filter).sort({ createdAt: -1 });
   if (receiptSelect) query = query.select(receiptSelect);
   const rows = await query.lean();
-  return rows.map(mapPartyEdit);
+
+  // When base64 receipts are excluded, still tell the client WHICH lots have a bill so the
+  // UI can show the thumbnail placeholder and lazy-load the image only for those rows.
+  if (receiptSelect) {
+    const withReceipt = await PartyEdit.find({
+      ...filter,
+      receipt: { $exists: true, $nin: ['', null] },
+    })
+      .select('_id')
+      .lean();
+    const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
+    return rows.map((doc) => ({ ...mapPartyEdit(doc), hasReceipt: receiptIds.has(String(doc._id)) }));
+  }
+
+  return rows.map((doc) => ({
+    ...mapPartyEdit(doc),
+    hasReceipt: typeof doc.receipt === 'string' && doc.receipt.trim() !== '',
+  }));
 }
 
 function attachOwnerNames(lots, ownerNameMap) {
