@@ -44,6 +44,16 @@ const paymentSchema = new mongoose.Schema({
     type: String,
     default: '',
   },
+  /** Optional payment slip image/pdf stored as a base64 data URL (excluded from list payloads for size). */
+  receipt: {
+    type: String,
+    default: '',
+  },
+  /** Lightweight presence flag so list/bootstrap payloads can show a slip thumbnail without shipping the blob. */
+  hasReceipt: {
+    type: Boolean,
+    default: false,
+  },
 }, {
   timestamps: true,
 });

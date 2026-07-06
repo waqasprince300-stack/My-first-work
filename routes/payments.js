@@ -9,6 +9,14 @@ const { emitOrgChange } = require('../utils/realtime');
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 const stripOwnership = ({ userId, ...data }) => data;
 
+/** Keep hasReceipt in sync with the stored slip so list/bootstrap can flag rows without the blob. */
+const withReceiptFlag = (data) => {
+  if (Object.prototype.hasOwnProperty.call(data, 'receipt')) {
+    data.hasReceipt = typeof data.receipt === 'string' && data.receipt.trim() !== '';
+  }
+  return data;
+};
+
 const withPartyId = async (payload, userId) => {
   const data = { ...payload };
   if (!data.partyId && data.party && String(data.party).toLowerCase() !== 'owner') {
@@ -60,9 +68,11 @@ router.get('/', async (req, res) => {
 
     const pagination = parsePaginationQuery(req);
     const sort = { createdAt: -1 };
+    // Slip images are excluded from list payloads (loaded lazily per row via GET /payments/:id).
+    const listSelect = '-receipt';
     if (pagination.paginate) {
       const [rows, total] = await Promise.all([
-        Payment.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        Payment.find(filter).select(listSelect).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
         Payment.countDocuments(filter),
       ]);
       return paginatedJson(
@@ -74,7 +84,7 @@ router.get('/', async (req, res) => {
       );
     }
 
-    const payments = await Payment.find(filter).sort(sort).lean();
+    const payments = await Payment.find(filter).select(listSelect).sort(sort).lean();
     res.json(payments.map((doc) => ({ ...doc, id: String(doc._id) })));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching payments', error: error.message });
@@ -110,7 +120,7 @@ router.post('/', async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const data = await withPartyId(stripOwnership(req.body), userId);
+    const data = withReceiptFlag(await withPartyId(stripOwnership(req.body), userId));
     const payment = new Payment({ ...data, userId, businessOwnerId: req.businessOwnerId });
     const saved = await payment.save();
     res.status(201).json(normalize(saved));
@@ -125,7 +135,7 @@ router.patch('/:id', async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const data = await withPartyId(stripOwnership(req.body), userId);
+    const data = withReceiptFlag(await withPartyId(stripOwnership(req.body), userId));
     const payment = await Payment.findOneAndUpdate(
       { _id: req.params.id, userId, businessOwnerId: req.businessOwnerId },
       data,

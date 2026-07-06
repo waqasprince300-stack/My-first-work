@@ -29,6 +29,11 @@ const partyEditSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+  /** Lot pictures added by party and/or admin, stored as base64 data URLs (excluded from list payloads for size). */
+  lotImages: {
+    type: [String],
+    default: [],
+  },
   notes: {
     type: String,
     default: '',

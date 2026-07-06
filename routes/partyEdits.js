@@ -12,6 +12,7 @@ const PARTY_EDIT_PATCH_FIELDS = [
   'completeDate',
   'partyBillAmount',
   'receipt',
+  'lotImages',
   'notes',
   'overrideStatus',
   'pendingRevision',
@@ -65,13 +66,15 @@ router.get('/', async (req, res) => {
       String(req.query.includeReceipts || '').toLowerCase() === '1'
       || req.query.includeReceipts === 'true';
     const pagination = parsePaginationQuery(req);
+    // Base64 images (bill receipt + lot pictures) are heavy — excluded unless explicitly requested.
+    const heavyImageSelect = '-receipt -lotImages';
     let query = PartyEdit.find(filter).sort({ createdAt: -1 });
-    if (!includeReceipts) query = query.select('-receipt');
+    if (!includeReceipts) query = query.select(heavyImageSelect);
     if (pagination.paginate) {
       const [rows, total] = await Promise.all([
         PartyEdit.find(filter)
           .sort({ createdAt: -1 })
-          .select(includeReceipts ? undefined : '-receipt')
+          .select(includeReceipts ? undefined : heavyImageSelect)
           .skip(pagination.skip)
           .limit(pagination.limit)
           .lean(),
@@ -125,7 +128,7 @@ router.get('/lot/:lotId', async (req, res) => {
       }
     }
 
-    const receiptSelect = includeReceipts ? undefined : '-receipt';
+    const receiptSelect = includeReceipts ? undefined : '-receipt -lotImages';
     let row = await PartyEdit.findOne({ lotId: lotIdStr, userId, businessOwnerId })
       .select(receiptSelect)
       .lean();

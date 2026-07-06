@@ -88,22 +88,36 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
   if (receiptSelect) query = query.select(receiptSelect);
   const rows = await query.lean();
 
-  // When base64 receipts are excluded, still tell the client WHICH lots have a bill so the
-  // UI can show the thumbnail placeholder and lazy-load the image only for those rows.
+  // When base64 images are excluded, still tell the client WHICH lots have a bill / lot pictures so
+  // the UI can show the thumbnail placeholder and lazy-load the image only for those rows.
   if (receiptSelect) {
-    const withReceipt = await PartyEdit.find({
-      ...filter,
-      receipt: { $exists: true, $nin: ['', null] },
-    })
-      .select('_id')
-      .lean();
+    const [withReceipt, withLotImages] = await Promise.all([
+      PartyEdit.find({
+        ...filter,
+        receipt: { $exists: true, $nin: ['', null] },
+      })
+        .select('_id')
+        .lean(),
+      PartyEdit.find({
+        ...filter,
+        'lotImages.0': { $exists: true },
+      })
+        .select('_id')
+        .lean(),
+    ]);
     const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
-    return rows.map((doc) => ({ ...mapPartyEdit(doc), hasReceipt: receiptIds.has(String(doc._id)) }));
+    const lotImageIds = new Set(withLotImages.map((d) => String(d._id)));
+    return rows.map((doc) => ({
+      ...mapPartyEdit(doc),
+      hasReceipt: receiptIds.has(String(doc._id)),
+      hasLotImages: lotImageIds.has(String(doc._id)),
+    }));
   }
 
   return rows.map((doc) => ({
     ...mapPartyEdit(doc),
     hasReceipt: typeof doc.receipt === 'string' && doc.receipt.trim() !== '',
+    hasLotImages: Array.isArray(doc.lotImages) && doc.lotImages.length > 0,
   }));
 }
 
@@ -129,7 +143,8 @@ async function fetchGhausiaLots(req, opts, ownerNameMap) {
 
 async function fetchPayments(req, opts) {
   const filter = paymentsFilter(req, opts);
-  const rows = await Payment.find(filter).sort({ createdAt: -1 }).lean();
+  // Slip images are excluded here (loaded lazily via GET /payments/:id); hasReceipt flags presence.
+  const rows = await Payment.find(filter).select('-receipt').sort({ createdAt: -1 }).lean();
   return rows.map(mapPayment);
 }
 
@@ -161,7 +176,7 @@ router.get('/', async (req, res) => {
     const minimal =
       String(req.query.minimal || '').toLowerCase() === '1'
       || req.query.minimal === 'true';
-    const receiptSelect = includeReceipts ? '' : '-receipt';
+    const receiptSelect = includeReceipts ? '' : '-receipt -lotImages';
 
     if (isTenantAdmin(req.user)) {
       const userId = getDataOwnerId(req.user);
