@@ -29,6 +29,41 @@ const pickPartyEditPatch = (body) => {
   return out;
 };
 
+/** Max lot pictures = number of colors on the lot (minimum 1). */
+const lotPicturesMaxFromColors = (colors) => {
+  const n = Number(colors);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.floor(n);
+};
+
+async function assertLotImagesWithinColorLimit(req, lotId, lotImages) {
+  if (lotImages === undefined) return null;
+  if (!Array.isArray(lotImages)) {
+    return 'lotImages must be an array';
+  }
+  let lot;
+  if (isParty(req.user)) {
+    lot = await GhausiaLot.findOne(
+      getPartyAccessibleLotFilter(req.user, { _id: lotId }),
+    )
+      .select('colors')
+      .lean();
+  } else {
+    lot = await GhausiaLot.findOne({
+      _id: lotId,
+      userId: getDataOwnerId(req.user),
+    })
+      .select('colors')
+      .lean();
+  }
+  if (!lot) return 'Lot not found';
+  const max = lotPicturesMaxFromColors(lot.colors);
+  if (lotImages.length > max) {
+    return `This lot allows at most ${max} picture(s) (${max} color(s)).`;
+  }
+  return null;
+};
+
 const getAllowedPartyLotIds = async (req) => {
   if (!isParty(req.user)) return null;
   const lots = await GhausiaLot.find({
@@ -188,14 +223,30 @@ router.post('/', async (req, res) => {
 router.patch('/:id', async (req, res) => {
   try {
     const allowedLotIds = await getAllowedPartyLotIds(req);
+    const accessFilter = {
+      _id: req.params.id,
+      ...getOwnerFilter(req),
+      ...getBusinessOwnerFilter(req),
+      ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
+    };
+    const patch = pickPartyEditPatch(req.body);
+    if (Object.prototype.hasOwnProperty.call(patch, 'lotImages')) {
+      const existing = await PartyEdit.findOne(accessFilter).select('lotId').lean();
+      if (!existing) {
+        return res.status(404).json({ message: 'Party edit not found' });
+      }
+      const lotImagesError = await assertLotImagesWithinColorLimit(
+        req,
+        existing.lotId,
+        patch.lotImages,
+      );
+      if (lotImagesError) {
+        return res.status(400).json({ message: lotImagesError });
+      }
+    }
     const partyEdit = await PartyEdit.findOneAndUpdate(
-      {
-        _id: req.params.id,
-        ...getOwnerFilter(req),
-        ...getBusinessOwnerFilter(req),
-        ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
-      },
-      stripOwnership(pickPartyEditPatch(req.body)),
+      accessFilter,
+      stripOwnership(patch),
       { new: true, runValidators: true }
     );
     if (!partyEdit) {
@@ -223,6 +274,17 @@ router.put('/lot/:lotId', async (req, res) => {
         return res.status(404).json({ message: 'Lot not found for this party' });
       }
       businessOwnerId = String(lot.businessOwnerId ?? '').trim();
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'lotImages')) {
+      const lotImagesError = await assertLotImagesWithinColorLimit(
+        req,
+        lotId,
+        req.body.lotImages,
+      );
+      if (lotImagesError) {
+        return res.status(400).json({ message: lotImagesError });
+      }
     }
 
     const data = { ...stripOwnership(req.body), lotId, userId, businessOwnerId };
