@@ -122,8 +122,42 @@ const sendOtpEmail = async ({ to, name, code, purpose, expiryMinutes }) => {
   });
 };
 
+/** Best-effort lot event email (reject / pending review). Caller should catch errors. */
+const sendLotNotificationEmail = async ({ to, name, subject, body, actionUrl }) => {
+  const transporter = createTransporter();
+  const from = getEnv('EMAIL_FROM') || getEnv('SMTP_USER');
+  const safeSubject = String(subject || 'Seam & Grace notification').trim();
+  const safeBody = String(body || '').trim();
+  const url = String(actionUrl || '').trim();
+
+  await transporter.sendMail({
+    from,
+    to,
+    subject: safeSubject,
+    text: [
+      `Hi ${name || 'there'},`,
+      '',
+      safeBody,
+      '',
+      url ? `Open in app: ${url}` : '',
+      '',
+      '— Seam & Grace',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+    html: `
+      <p>Hi ${name || 'there'},</p>
+      <p>${safeBody.replace(/\n/g, '<br/>')}</p>
+      ${url ? `<p><a href="${url}">Open in app</a></p>` : ''}
+      <p style="color:#64748b;font-size:12px;">— Seam &amp; Grace</p>
+    `,
+  });
+};
+
 module.exports = {
   getMailConfigError,
   sendPasswordResetEmail,
   sendOtpEmail,
+  sendLotNotificationEmail,
 };
+

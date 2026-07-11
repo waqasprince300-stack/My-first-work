@@ -30,6 +30,7 @@ const superAdminRouter = require('./routes/superAdmin');
 const businessOwnersRouter = require('./routes/businessOwners');
 const personalKhataRouter = require('./routes/personalKhata');
 const bootstrapRouter = require('./routes/bootstrap');
+const notificationsRouter = require('./routes/notifications');
 
 const app = express();
 const server = http.createServer(app);
@@ -170,6 +171,7 @@ app.use('/api/savedDesigns', authenticate, requireApproved, resolveBusinessOwner
 app.use('/api/dashboard', authenticate, requireApproved, resolveBusinessOwner, dashboardRouter);
 app.use('/api/personal-khata', authenticate, requireApproved, personalKhataRouter);
 app.use('/api/bootstrap', authenticate, requireApproved, resolveBusinessOwnerAllowMissing, bootstrapRouter);
+app.use('/api/notifications', authenticate, requireApproved, notificationsRouter);
 
 
 // ✅ Health check

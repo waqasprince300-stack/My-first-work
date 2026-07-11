@@ -7,6 +7,7 @@ const PartyEdit = require('../models/PartyEdit');
 const { getDataOwnerId, getScopedFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, escapeRegexString, isParty, requireAdminUser, isTenantAdmin, toObjectId } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 const { emitOrgChange } = require('../utils/realtime');
+const { notifyLotRejected, notifyLotPendingReview } = require('../utils/lotNotifications');
 
 const stripOwnership = ({ userId, ...data }) => data;
 const partyEditableLotFields = new Set(['status', 'dispatchDate', 'receivedBackDate']);
@@ -366,7 +367,14 @@ router.post('/:id/reject-completion', async (req, res) => {
 
     await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
     res.json(lot);
-    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+    const lotObj = lot.toObject({ virtuals: true });
+    emitOrgChange(req, 'lot', {
+      lotId: String(lot._id),
+      action: 'lot_rejected',
+      partyId: String(lot.partyId || ''),
+      linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
+    });
+    void notifyLotRejected({ lot: lotObj, note, ownerId: userId });
   } catch (error) {
     res.status(400).json({ message: 'Could not reject lot', error: error.message });
   }
@@ -443,6 +451,7 @@ router.patch('/:id', async (req, res) => {
       }
     }
 
+    let becamePendingApproval = false;
     if (isParty(req.user) && payload.status) {
       const next = normalizeStatus(payload.status);
       const cur = normalizeStatus(existing.status);
@@ -466,6 +475,9 @@ router.patch('/:id', async (req, res) => {
             message:
               'You can submit for approval only when the lot is pending, dispatched, or in progress.',
           });
+        }
+        if (cur !== 'pending approval') {
+          becamePendingApproval = true;
         }
       }
       if (next === 'dispatched' && cur === 'rejected') {
@@ -495,7 +507,17 @@ router.patch('/:id', async (req, res) => {
       lot.businessOwnerId,
     );
     res.json(lot);
-    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+    const lotObj = lot.toObject({ virtuals: true });
+    if (becamePendingApproval) {
+      emitOrgChange(req, 'lot', {
+        lotId: String(lot._id),
+        action: 'lot_pending_review',
+        linkPath: `/review-lots?lotId=${encodeURIComponent(String(lot._id))}`,
+      });
+      void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
+    } else {
+      emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+    }
   } catch (error) {
     if (error.code === 'DUPLICATE_LOT_NUMBER') {
       return res.status(409).json({ message: error.message });
