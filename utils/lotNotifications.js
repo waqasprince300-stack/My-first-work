@@ -126,8 +126,8 @@ async function notifyLotRejected({ lot, note, ownerId }) {
     const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
     const title = `Lot rejected — ${label}`;
     const body = note
-      ? `Admin rejected lot ${label}. Reason: ${note}`
-      : `Admin rejected lot ${label}. Open Party Ledger to review and resubmit.`;
+      ? `The business rejected lot ${label}. Reason: ${note}`
+      : `The business rejected lot ${label}. Open My Lots to review and resubmit.`;
 
     await Promise.all(
       partyUsers.map((user) =>
@@ -276,8 +276,8 @@ async function notifyBillRevisionResolved({ lot, ownerId, approved, fromAmount, 
       ? `Bill change approved — ${label}`
       : `Bill change rejected — ${label}`;
     const body = approved
-      ? `Admin approved ₨${from.toLocaleString()} → ₨${to.toLocaleString()} on lot ${label}.`
-      : `Admin rejected your bill change on lot ${label}.${note ? ` Reason: ${note}` : ''} Open Party Ledger to review.`;
+      ? `The business approved ₨${from.toLocaleString()} → ₨${to.toLocaleString()} on lot ${label}.`
+      : `The business rejected your bill change on lot ${label}.${note ? ` Reason: ${note}` : ''} Open My Lots to review.`;
 
     await Promise.all(
       partyUsers.map((user) =>
@@ -328,13 +328,13 @@ async function notifyPaymentRecorded({ payment, ownerId }) {
         : `Payment from you — ${amt}`;
     const parts = [];
     if (payType === 'Paid') {
-      parts.push(`Admin recorded a payment of ${amt} to you.`);
+      parts.push(`The business recorded a payment of ${amt} to you.`);
     } else {
-      parts.push(`Admin recorded a payment of ${amt} from you.`);
+      parts.push(`The business recorded a payment of ${amt} from you.`);
     }
     if (lotBit) parts.push(`Lot: ${lotBit}.`);
     if (note) parts.push(`Note: ${note}`);
-    parts.push('Open Payments to review.');
+    parts.push('Open My Payments to review.');
 
     const paymentId = String(payment._id || payment.id || '').trim();
     await Promise.all(
