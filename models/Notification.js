@@ -16,7 +16,14 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['lot_rejected', 'lot_pending_review'],
+      enum: [
+        'lot_rejected',
+        'lot_pending_review',
+        'bill_revision_request',
+        'bill_revision_approved',
+        'bill_revision_rejected',
+        'payment_recorded',
+      ],
       required: true,
     },
     title: {

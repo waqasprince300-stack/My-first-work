@@ -5,6 +5,7 @@ const GhausiaLot = require('../models/GhausiaLot');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 const { emitOrgChange } = require('../utils/realtime');
+const { notifyBillRevisionRequest, notifyBillRevisionResolved } = require('../utils/lotNotifications');
 
 const stripOwnership = ({ userId, ...data }) => data;
 
@@ -28,6 +29,50 @@ const pickPartyEditPatch = (body) => {
   }
   return out;
 };
+
+/** Attach hasReceipt / lotImagesCount without shipping base64 blobs. */
+async function attachPartyEditImageMeta(filter, rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return (rows || []).map((p) => ({ ...p, id: String(p._id || p.id) }));
+  }
+  const [withReceipt, imageMeta] = await Promise.all([
+    PartyEdit.find({
+      ...filter,
+      receipt: { $exists: true, $nin: ['', null] },
+    })
+      .select('_id')
+      .lean(),
+    PartyEdit.aggregate([
+      { $match: filter },
+      {
+        $project: {
+          _id: 1,
+          lotImagesCount: { $size: { $ifNull: ['$lotImages', []] } },
+        },
+      },
+    ]),
+  ]);
+  const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
+  const countById = new Map(
+    imageMeta.map((d) => [String(d._id), Number(d.lotImagesCount) || 0]),
+  );
+  return rows.map((doc) => {
+    const id = String(doc._id || doc.id);
+    const lotImagesCount = Array.isArray(doc.lotImages)
+      ? doc.lotImages.length
+      : countById.get(id) || 0;
+    return {
+      ...doc,
+      id,
+      hasReceipt:
+        typeof doc.receipt === 'string' && doc.receipt.trim() !== ''
+          ? true
+          : receiptIds.has(id),
+      hasLotImages: lotImagesCount > 0,
+      lotImagesCount,
+    };
+  });
+}
 
 /** Max lot pictures = number of colors on the lot (minimum 1). */
 const lotPicturesMaxFromColors = (colors) => {
@@ -101,36 +146,39 @@ router.get('/', async (req, res) => {
       String(req.query.includeReceipts || '').toLowerCase() === '1'
       || req.query.includeReceipts === 'true';
     const pagination = parsePaginationQuery(req);
-    // Base64 images (bill receipt + lot pictures) are heavy — excluded unless explicitly requested.
+    // Base64 images are heavy — excluded unless explicitly requested.
+    // includeReceipts = bill only; includeLotImages = lot pictures only (see GET /lot/:id).
     const heavyImageSelect = '-receipt -lotImages';
     let query = PartyEdit.find(filter).sort({ createdAt: -1 });
     if (!includeReceipts) query = query.select(heavyImageSelect);
+    else query = query.select('-lotImages');
     if (pagination.paginate) {
       const [rows, total] = await Promise.all([
         PartyEdit.find(filter)
           .sort({ createdAt: -1 })
-          .select(includeReceipts ? undefined : heavyImageSelect)
+          .select(includeReceipts ? '-lotImages' : heavyImageSelect)
           .skip(pagination.skip)
           .limit(pagination.limit)
           .lean(),
         PartyEdit.countDocuments(filter),
       ]);
+      const withMeta = await attachPartyEditImageMeta(filter, rows);
       return paginatedJson(
         res,
-        rows.map((p) => ({ ...p, id: String(p._id) })),
+        withMeta,
         total,
         pagination.page,
         pagination.limit,
       );
     }
     const partyEdits = await query.lean();
-    res.json(partyEdits.map((p) => ({ ...p, id: String(p._id) })));
+    res.json(await attachPartyEditImageMeta(filter, partyEdits));
   } catch (error) {
     res.status(500).json({ message: 'Error fetching party edits', error: error.message });
   }
 });
 
-// Get party edit for a single lot (optional receipt for lazy loading)
+// Get party edit for a single lot (optional receipt / lot pictures for lazy loading)
 router.get('/lot/:lotId', async (req, res) => {
   try {
     const lotIdStr = String(req.params.lotId || '').trim();
@@ -140,6 +188,9 @@ router.get('/lot/:lotId', async (req, res) => {
     const includeReceipts =
       String(req.query.includeReceipts || '').toLowerCase() === '1'
       || req.query.includeReceipts === 'true';
+    const includeLotImages =
+      String(req.query.includeLotImages || '').toLowerCase() === '1'
+      || req.query.includeLotImages === 'true';
 
     if (isParty(req.user)) {
       const lot = await GhausiaLot.findOne(
@@ -163,9 +214,13 @@ router.get('/lot/:lotId', async (req, res) => {
       }
     }
 
-    const receiptSelect = includeReceipts ? undefined : '-receipt -lotImages';
+    const exclude = [];
+    if (!includeReceipts) exclude.push('-receipt');
+    if (!includeLotImages) exclude.push('-lotImages');
+    const fieldSelect = exclude.length ? exclude.join(' ') : undefined;
+
     let row = await PartyEdit.findOne({ lotId: lotIdStr, userId, businessOwnerId })
-      .select(receiptSelect)
+      .select(fieldSelect)
       .lean();
 
     // Both the admin and the party ledger span multiple workspaces, so a businessOwnerId/header
@@ -174,14 +229,23 @@ router.get('/lot/:lotId', async (req, res) => {
     // tenant, so this businessOwnerId-agnostic fallback is safe for party and admin alike.
     if (!row) {
       row = await PartyEdit.findOne({ lotId: lotIdStr, userId })
-        .select(receiptSelect)
+        .select(fieldSelect)
         .lean();
     }
 
     if (!row) {
       return res.status(404).json({ message: 'Party edit not found' });
     }
-    res.json({ ...row, id: String(row._id) });
+    const lotImagesCount = Array.isArray(row.lotImages)
+      ? row.lotImages.length
+      : undefined;
+    res.json({
+      ...row,
+      id: String(row._id),
+      ...(lotImagesCount !== undefined
+        ? { lotImagesCount, hasLotImages: lotImagesCount > 0 }
+        : {}),
+    });
   } catch (error) {
     res.status(500).json({ message: 'Error fetching party edit', error: error.message });
   }
@@ -302,13 +366,103 @@ router.put('/lot/:lotId', async (req, res) => {
         ? { $set: data, $unset: unset }
         : data;
 
+    let prevBillRev = null;
+    if (
+      !isParty(req.user) &&
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'billRevisionRequest')
+    ) {
+      const existing = await PartyEdit.findOne({ lotId, userId, businessOwnerId })
+        .select('billRevisionRequest')
+        .lean();
+      prevBillRev = existing?.billRevisionRequest || null;
+      if (!prevBillRev) {
+        const fallback = await PartyEdit.findOne({ lotId, userId })
+          .select('billRevisionRequest')
+          .lean();
+        prevBillRev = fallback?.billRevisionRequest || null;
+      }
+    }
+
     const partyEdit = await PartyEdit.findOneAndUpdate(
       { lotId, userId, businessOwnerId },
       update,
       { new: true, upsert: true, runValidators: true }
     );
     res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
-    emitOrgChange(req, 'partyEdit', { lotId: String(lotId) });
+
+    const bodyRev = req.body?.billRevisionRequest;
+    const isNewPendingBillRev =
+      isParty(req.user) &&
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'billRevisionRequest') &&
+      bodyRev &&
+      typeof bodyRev === 'object' &&
+      String(bodyRev.status || '').toLowerCase() === 'pending';
+
+    const loadLotForNotify = async () => {
+      try {
+        const byOwner = await GhausiaLot.findOne({ _id: lotId, userId }).lean();
+        if (byOwner) return byOwner;
+      } catch {
+        /* ignore */
+      }
+      try {
+        return await GhausiaLot.findById(lotId).lean();
+      } catch {
+        return null;
+      }
+    };
+
+    if (isNewPendingBillRev) {
+      const lotForNotify = await loadLotForNotify();
+      const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}&billReview=1`;
+      emitOrgChange(req, 'partyEdit', {
+        lotId: String(lotId),
+        action: 'bill_revision_request',
+        linkPath,
+      });
+      if (lotForNotify) {
+        void notifyBillRevisionRequest({
+          lot: lotForNotify,
+          ownerId: userId,
+          fromAmount: bodyRev.fromAmount,
+          toAmount: bodyRev.toAmount,
+          reason: bodyRev.reason,
+        });
+      }
+    } else if (
+      !isParty(req.user) &&
+      Object.prototype.hasOwnProperty.call(req.body || {}, 'billRevisionRequest')
+    ) {
+      const approved = bodyRev === null && prevBillRev;
+      const rejected =
+        bodyRev &&
+        typeof bodyRev === 'object' &&
+        String(bodyRev.status || '').toLowerCase() === 'rejected';
+      if (approved || rejected) {
+        const lotForNotify = await loadLotForNotify();
+        const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}`;
+        const action = approved ? 'bill_revision_approved' : 'bill_revision_rejected';
+        emitOrgChange(req, 'partyEdit', {
+          lotId: String(lotId),
+          action,
+          linkPath,
+        });
+        if (lotForNotify) {
+          void notifyBillRevisionResolved({
+            lot: lotForNotify,
+            ownerId: userId,
+            approved: Boolean(approved),
+            fromAmount: prevBillRev?.fromAmount ?? bodyRev?.fromAmount,
+            toAmount: prevBillRev?.toAmount ?? bodyRev?.toAmount,
+            note: bodyRev?.rejectionNote,
+          });
+        }
+      } else {
+        emitOrgChange(req, 'partyEdit', { lotId: String(lotId) });
+      }
+    } else {
+      emitOrgChange(req, 'partyEdit', { lotId: String(lotId) });
+    }
   } catch (error) {
     res.status(400).json({ message: 'Error upserting party edit', error: error.message });
   }

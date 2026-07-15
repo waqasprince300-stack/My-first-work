@@ -82,30 +82,43 @@ async function createAndEmailNotification({
 }
 
 /** Admin rejected a completion — notify the party user assigned to this lot. */
+async function findPartyUsersForLot({ lot, ownerId }) {
+  return findPartyUsersByRef({
+    ownerId,
+    partyId: lot?.partyId,
+    partyName: lot?.partyName,
+  });
+}
+
+async function findPartyUsersByRef({ ownerId, partyId, partyName }) {
+  const oid = String(ownerId || '').trim();
+  if (!oid) return [];
+
+  const pid = String(partyId || '').trim();
+  const pname = String(partyName || '').trim();
+  if (!pid && !pname) return [];
+  if (pname.toLowerCase() === 'owner') return [];
+
+  const or = [];
+  if (pid) or.push({ partyId: pid });
+  if (pname) {
+    or.push({ partyName: new RegExp(`^${pname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
+  }
+
+  return User.find({
+    role: 'party',
+    status: 'approved',
+    $or: [{ ownerId: oid }, { approvedBy: oid }],
+    $and: [{ $or: or }],
+  })
+    .select('name email partyId partyName')
+    .lean();
+}
+
 async function notifyLotRejected({ lot, note, ownerId }) {
   try {
     const oid = String(ownerId || '').trim();
-    if (!oid || !lot) return;
-
-    const partyId = String(lot.partyId || '').trim();
-    const partyName = String(lot.partyName || '').trim();
-    if (!partyId && !partyName) return;
-
-    const or = [];
-    if (partyId) or.push({ partyId });
-    if (partyName) {
-      or.push({ partyName: new RegExp(`^${partyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') });
-    }
-
-    const partyUsers = await User.find({
-      role: 'party',
-      status: 'approved',
-      $or: [{ ownerId: oid }, { approvedBy: oid }],
-      $and: [{ $or: or }],
-    })
-      .select('name email partyId partyName')
-      .lean();
-
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
     if (!partyUsers.length) return;
 
     const label = lotLabel(lot);
@@ -186,8 +199,172 @@ async function notifyLotPendingReview({ lot, ownerId }) {
   }
 }
 
+async function findOrgAdmins(ownerId) {
+  const oid = String(ownerId || '').trim();
+  if (!oid) return [];
+
+  const admins = await User.find({
+    role: 'admin',
+    status: 'approved',
+    $or: [{ _id: oid }, { ownerId: oid }],
+  })
+    .select('name email')
+    .lean();
+
+  const byId = new Map();
+  for (const a of admins) byId.set(String(a._id), a);
+  if (!byId.has(oid)) {
+    const primary = await User.findOne({ _id: oid, role: 'admin', status: 'approved' })
+      .select('name email')
+      .lean();
+    if (primary) byId.set(oid, primary);
+  }
+  return [...byId.values()];
+}
+
+/** Party requested a bill-amount change on a completed lot — notify org admins. */
+async function notifyBillRevisionRequest({ lot, ownerId, fromAmount, toAmount, reason }) {
+  try {
+    const oid = String(ownerId || '').trim();
+    if (!oid || !lot) return;
+
+    const recipients = await findOrgAdmins(oid);
+    if (!recipients.length) return;
+
+    const label = lotLabel(lot);
+    const party = String(lot.partyName || '').trim() || 'Party';
+    const lotId = String(lot._id || lot.id || '').trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}&billReview=1`;
+    const from = Number(fromAmount) || 0;
+    const to = Number(toAmount) || 0;
+    const title = `Bill change request — ${label}`;
+    const reasonBit = reason ? ` Reason: ${reason}` : '';
+    const body = `${party} requested ₨${from.toLocaleString()} → ₨${to.toLocaleString()} on lot ${label}.${reasonBit} Open Party Ledger to review.`;
+
+    await Promise.all(
+      recipients.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: 'bill_revision_request',
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn('[lotNotifications] notifyBillRevisionRequest failed:', err?.message || err);
+  }
+}
+
+/** Admin approved/rejected a bill-change request — notify the party. */
+async function notifyBillRevisionResolved({ lot, ownerId, approved, fromAmount, toAmount, note }) {
+  try {
+    const oid = String(ownerId || '').trim();
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const lotId = String(lot._id || lot.id || '').trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
+    const from = Number(fromAmount) || 0;
+    const to = Number(toAmount) || 0;
+    const type = approved ? 'bill_revision_approved' : 'bill_revision_rejected';
+    const title = approved
+      ? `Bill change approved — ${label}`
+      : `Bill change rejected — ${label}`;
+    const body = approved
+      ? `Admin approved ₨${from.toLocaleString()} → ₨${to.toLocaleString()} on lot ${label}.`
+      : `Admin rejected your bill change on lot ${label}.${note ? ` Reason: ${note}` : ''} Open Party Ledger to review.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type,
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn('[lotNotifications] notifyBillRevisionResolved failed:', err?.message || err);
+  }
+}
+
+/** Admin saved a payment for a party — notify that party's users. */
+async function notifyPaymentRecorded({ payment, ownerId }) {
+  try {
+    const oid = String(ownerId || '').trim();
+    if (!oid || !payment) return;
+
+    const partyName = String(payment.party || '').trim();
+    const partyId = String(payment.partyId || '').trim();
+    if (!partyId && (!partyName || partyName.toLowerCase() === 'owner')) return;
+
+    const partyUsers = await findPartyUsersByRef({
+      ownerId: oid,
+      partyId,
+      partyName,
+    });
+    if (!partyUsers.length) return;
+
+    const amount = Number(payment.amount) || 0;
+    const payType = String(payment.type || '').trim();
+    const note = String(payment.note || '').trim();
+    const lotBit = String(payment.linkedLot || '').trim();
+    const linkPath = '/payments';
+    const amt = `₨${amount.toLocaleString()}`;
+
+    // Paid = admin paid the party; Received = party paid the business.
+    const title =
+      payType === 'Paid'
+        ? `Payment to you — ${amt}`
+        : `Payment from you — ${amt}`;
+    const parts = [];
+    if (payType === 'Paid') {
+      parts.push(`Admin recorded a payment of ${amt} to you.`);
+    } else {
+      parts.push(`Admin recorded a payment of ${amt} from you.`);
+    }
+    if (lotBit) parts.push(`Lot: ${lotBit}.`);
+    if (note) parts.push(`Note: ${note}`);
+    parts.push('Open Payments to review.');
+
+    const paymentId = String(payment._id || payment.id || '').trim();
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: 'payment_recorded',
+          title,
+          body: parts.join(' '),
+          // Use payment id as lotId key so rapid successive payments are not deduped away.
+          lot: {
+            id: paymentId ? `payment:${paymentId}` : '',
+            lotNumber: lotBit,
+            businessOwnerId: payment.businessOwnerId,
+          },
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn('[lotNotifications] notifyPaymentRecorded failed:', err?.message || err);
+  }
+}
+
 module.exports = {
   notifyLotRejected,
   notifyLotPendingReview,
+  notifyBillRevisionRequest,
+  notifyBillRevisionResolved,
+  notifyPaymentRecorded,
   frontendBaseUrl,
 };

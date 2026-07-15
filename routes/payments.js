@@ -5,6 +5,7 @@ const Party = require('../models/Party');
 const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyPaymentOrConditions, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
 const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
 const { emitOrgChange } = require('../utils/realtime');
+const { notifyPaymentRecorded } = require('../utils/lotNotifications');
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 const stripOwnership = ({ userId, ...data }) => data;
@@ -75,9 +76,24 @@ router.get('/', async (req, res) => {
         Payment.find(filter).select(listSelect).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
         Payment.countDocuments(filter),
       ]);
+      const missingFlag = rows.filter((d) => d.hasReceipt !== true);
+      let slipIds = new Set();
+      if (missingFlag.length) {
+        const withSlip = await Payment.find({
+          _id: { $in: missingFlag.map((d) => d._id) },
+          receipt: { $exists: true, $nin: ['', null] },
+        })
+          .select('_id')
+          .lean();
+        slipIds = new Set(withSlip.map((d) => String(d._id)));
+      }
       return paginatedJson(
         res,
-        rows.map((doc) => ({ ...doc, id: String(doc._id) })),
+        rows.map((doc) => ({
+          ...doc,
+          id: String(doc._id),
+          hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
+        })),
         total,
         pagination.page,
         pagination.limit,
@@ -85,7 +101,24 @@ router.get('/', async (req, res) => {
     }
 
     const payments = await Payment.find(filter).select(listSelect).sort(sort).lean();
-    res.json(payments.map((doc) => ({ ...doc, id: String(doc._id) })));
+    const missingFlag = payments.filter((d) => d.hasReceipt !== true);
+    let slipIds = new Set();
+    if (missingFlag.length) {
+      const withSlip = await Payment.find({
+        _id: { $in: missingFlag.map((d) => d._id) },
+        receipt: { $exists: true, $nin: ['', null] },
+      })
+        .select('_id')
+        .lean();
+      slipIds = new Set(withSlip.map((d) => String(d._id)));
+    }
+    res.json(
+      payments.map((doc) => ({
+        ...doc,
+        id: String(doc._id),
+        hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
+      })),
+    );
   } catch (error) {
     res.status(500).json({ message: 'Error fetching payments', error: error.message });
   }
@@ -94,16 +127,14 @@ router.get('/', async (req, res) => {
 // Get single payment
 router.get('/:id', async (req, res) => {
   try {
+    // Party payments span every workspace (same as partyScope=all list). Do not filter by
+    // businessOwnerId here — that made slips visible in the list but 404 on open.
     const filter = isParty(req.user)
       ? {
-        _id: req.params.id,
-        ...getOwnerFilter(req),
-        ...getBusinessOwnerFilter(req),
-        $or: [
-          { partyId: String(req.user.partyId || '') },
-          { party: req.user.partyName || '' },
-        ],
-      }
+          _id: req.params.id,
+          ...getOwnerFilter(req),
+          $or: getPartyPaymentOrConditions(req.user),
+        }
       : { _id: req.params.id, ...getOwnerFilter(req), ...getBusinessOwnerFilter(req) };
     const payment = await Payment.findOne(filter);
     if (!payment) {
@@ -124,7 +155,21 @@ router.post('/', async (req, res) => {
     const payment = new Payment({ ...data, userId, businessOwnerId: req.businessOwnerId });
     const saved = await payment.save();
     res.status(201).json(normalize(saved));
-    emitOrgChange(req, 'payment', { paymentId: String(saved._id) });
+    const paymentObj = saved.toObject ? saved.toObject() : saved;
+    const partyLabel = String(paymentObj.party || '').trim().toLowerCase();
+    const isPartyPayment = partyLabel && partyLabel !== 'owner';
+    if (isPartyPayment) {
+      const linkPath = '/payments';
+      emitOrgChange(req, 'payment', {
+        paymentId: String(saved._id),
+        action: 'payment_recorded',
+        linkPath,
+        partyId: String(paymentObj.partyId || ''),
+      });
+      void notifyPaymentRecorded({ payment: paymentObj, ownerId: userId });
+    } else {
+      emitOrgChange(req, 'payment', { paymentId: String(saved._id) });
+    }
   } catch (error) {
     res.status(400).json({ message: 'Error creating payment', error: error.message });
   }

@@ -88,37 +88,50 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
   if (receiptSelect) query = query.select(receiptSelect);
   const rows = await query.lean();
 
-  // When base64 images are excluded, still tell the client WHICH lots have a bill / lot pictures so
-  // the UI can show the thumbnail placeholder and lazy-load the image only for those rows.
+  // When base64 images are excluded, still tell the client which lots have a bill / how many
+  // lot pictures exist so the UI can show accurate badges without downloading blobs.
   if (receiptSelect) {
-    const [withReceipt, withLotImages] = await Promise.all([
+    const [withReceipt, imageMeta] = await Promise.all([
       PartyEdit.find({
         ...filter,
         receipt: { $exists: true, $nin: ['', null] },
       })
         .select('_id')
         .lean(),
-      PartyEdit.find({
-        ...filter,
-        'lotImages.0': { $exists: true },
-      })
-        .select('_id')
-        .lean(),
+      PartyEdit.aggregate([
+        { $match: filter },
+        {
+          $project: {
+            _id: 1,
+            lotImagesCount: { $size: { $ifNull: ['$lotImages', []] } },
+          },
+        },
+      ]),
     ]);
     const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
-    const lotImageIds = new Set(withLotImages.map((d) => String(d._id)));
-    return rows.map((doc) => ({
-      ...mapPartyEdit(doc),
-      hasReceipt: receiptIds.has(String(doc._id)),
-      hasLotImages: lotImageIds.has(String(doc._id)),
-    }));
+    const countById = new Map(
+      imageMeta.map((d) => [String(d._id), Number(d.lotImagesCount) || 0]),
+    );
+    return rows.map((doc) => {
+      const lotImagesCount = countById.get(String(doc._id)) || 0;
+      return {
+        ...mapPartyEdit(doc),
+        hasReceipt: receiptIds.has(String(doc._id)),
+        hasLotImages: lotImagesCount > 0,
+        lotImagesCount,
+      };
+    });
   }
 
-  return rows.map((doc) => ({
-    ...mapPartyEdit(doc),
-    hasReceipt: typeof doc.receipt === 'string' && doc.receipt.trim() !== '',
-    hasLotImages: Array.isArray(doc.lotImages) && doc.lotImages.length > 0,
-  }));
+  return rows.map((doc) => {
+    const lotImagesCount = Array.isArray(doc.lotImages) ? doc.lotImages.length : 0;
+    return {
+      ...mapPartyEdit(doc),
+      hasReceipt: typeof doc.receipt === 'string' && doc.receipt.trim() !== '',
+      hasLotImages: lotImagesCount > 0,
+      lotImagesCount,
+    };
+  });
 }
 
 function attachOwnerNames(lots, ownerNameMap) {
@@ -145,7 +158,21 @@ async function fetchPayments(req, opts) {
   const filter = paymentsFilter(req, opts);
   // Slip images are excluded here (loaded lazily via GET /payments/:id); hasReceipt flags presence.
   const rows = await Payment.find(filter).select('-receipt').sort({ createdAt: -1 }).lean();
-  return rows.map(mapPayment);
+  const missingFlag = rows.filter((d) => d.hasReceipt !== true);
+  let slipIds = new Set();
+  if (missingFlag.length) {
+    const withSlip = await Payment.find({
+      _id: { $in: missingFlag.map((d) => d._id) },
+      receipt: { $exists: true, $nin: ['', null] },
+    })
+      .select('_id')
+      .lean();
+    slipIds = new Set(withSlip.map((d) => String(d._id)));
+  }
+  return rows.map((doc) => ({
+    ...mapPayment(doc),
+    hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
+  }));
 }
 
 /** Workspace directory for party users — derived from the owners referenced by their accessible lots. */
