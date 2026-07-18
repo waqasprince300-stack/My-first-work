@@ -10,28 +10,69 @@ if (typeof dns.setDefaultResultOrder === 'function') {
 
 const dnsFailure = (msg) => /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i.test(String(msg || ''));
 
+/** Last URI that successfully connected (DoH / fallback / primary) — used to reconnect. */
+let activeUri = null;
+let eventsWired = false;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let lastDisconnectLogAt = 0;
+
 const connectOpts = () =>
   getMongooseConnectOptions({
-    // Surface a slow/unreachable cluster quickly instead of hanging the request for 45s.
     serverSelectionTimeoutMS: Number(process.env.MONGO_SERVER_SELECTION_TIMEOUT_MS) || 15_000,
     socketTimeoutMS: Number(process.env.MONGO_SOCKET_TIMEOUT_MS) || 45_000,
     connectTimeoutMS: Number(process.env.MONGO_CONNECT_TIMEOUT_MS) || 15_000,
-    // Shared/free Atlas tiers have low connection limits — a modest pool avoids exhaustion.
     maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE) || 10,
-    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 1,
-    // Don't let a request wait forever for a free pooled connection.
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE) || 0,
     waitQueueTimeoutMS: Number(process.env.MONGO_WAIT_QUEUE_TIMEOUT_MS) || 15_000,
-    // Auto-retry transient network blips on reads/writes (default true, set explicitly).
+    // Keep monitoring softer on flaky networks so one blip does not thrash the pool.
+    heartbeatFrequencyMS: Number(process.env.MONGO_HEARTBEAT_MS) || 20_000,
     retryReads: true,
     retryWrites: true,
   });
 
+const scheduleReconnect = () => {
+  if (!activeUri) return;
+  if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) return;
+  if (reconnectTimer) return;
+
+  const delay = Math.min(30_000, 1_500 * 2 ** Math.min(reconnectAttempt, 4));
+  reconnectAttempt += 1;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    if (mongoose.connection.readyState === 1 || mongoose.connection.readyState === 2) return;
+    try {
+      console.log(`🔄 Reconnecting MongoDB (attempt ${reconnectAttempt})…`);
+      await mongoose.connect(activeUri, connectOpts());
+      reconnectAttempt = 0;
+      console.log('✅ MongoDB reconnected:', mongoose.connection.host);
+    } catch (err) {
+      console.error('❌ MongoDB reconnect failed:', err.message || err);
+      scheduleReconnect();
+    }
+  }, delay);
+};
+
 const wireEvents = () => {
-  mongoose.connection.on('disconnected', () => {
-    console.log('⚠️ MongoDB disconnected');
+  if (eventsWired) return;
+  eventsWired = true;
+
+  mongoose.connection.on('connected', () => {
+    reconnectAttempt = 0;
   });
+
+  mongoose.connection.on('disconnected', () => {
+    const now = Date.now();
+    // Avoid spam when several pool sockets close at once.
+    if (now - lastDisconnectLogAt > 2_000) {
+      lastDisconnectLogAt = now;
+      console.log('⚠️ MongoDB disconnected — will auto-reconnect…');
+    }
+    scheduleReconnect();
+  });
+
   mongoose.connection.on('error', (err) => {
-    console.error('❌ MongoDB connection error:', err);
+    console.error('❌ MongoDB connection error:', err.message || err);
   });
 };
 
@@ -59,6 +100,8 @@ const connectDB = async () => {
 
   const tryUri = async (uri, label) => {
     await mongoose.connect(uri, opts);
+    activeUri = uri;
+    reconnectAttempt = 0;
     console.log(`✅ MongoDB connected (${label}):`, mongoose.connection.host);
     console.log(`   Database: ${mongoose.connection.name}`);
   };
@@ -100,7 +143,13 @@ const connectDB = async () => {
         await tryUri(standardUri, 'DNS-over-HTTPS');
         wireEvents();
         console.warn(
-          '   Tip: comment out NODE_DNS_SERVERS if set. Optional: paste this mongodb:// string as MONGODB_URI to avoid DoH on startup.',
+          '   Tip: PC DNS is unreliable for Atlas. In Atlas → Connect → Drivers, copy the standard',
+        );
+        console.warn(
+          '   mongodb://… string into .env as MONGODB_URI (or MONGODB_FALLBACK_URI) for a stable connection.',
+        );
+        console.warn(
+          '   Also Atlas → Network Access → Allow Access from Anywhere (0.0.0.0/0) or your current IP.',
         );
         return mongoose.connection;
       } catch (errDoh) {
