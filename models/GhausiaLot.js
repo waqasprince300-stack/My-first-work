@@ -129,6 +129,12 @@ const ghausiaLotSchema = new mongoose.Schema({
     default: null,
     required: false,
   },
+  /** When the party submitted this lot for admin review (pending approval). */
+  pendingReviewSubmittedAt: {
+    type: Date,
+    default: null,
+    required: false,
+  },
   status: {
     type: String,
     enum: [

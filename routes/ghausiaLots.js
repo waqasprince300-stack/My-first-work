@@ -478,6 +478,7 @@ router.patch('/:id', async (req, res) => {
         }
         if (cur !== 'pending approval') {
           becamePendingApproval = true;
+          payload.pendingReviewSubmittedAt = new Date();
         }
       }
       if (next === 'dispatched' && cur === 'rejected') {
