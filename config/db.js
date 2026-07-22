@@ -9,7 +9,7 @@ if (typeof dns.setDefaultResultOrder === 'function') {
 }
 
 const dnsFailure = (msg) => /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i.test(String(msg || ''));
-
+OK OP
 /** Last URI that successfully connected (DoH / fallback / primary) — used to reconnect. */
 let activeUri = null;
 let eventsWired = false;
