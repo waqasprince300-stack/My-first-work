@@ -1,10 +1,10 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const BusinessOwner = require('../models/BusinessOwner');
-const Party = require('../models/Party');
-const GhausiaLot = require('../models/GhausiaLot');
-const Payment = require('../models/Payment');
-const PartyEdit = require('../models/PartyEdit');
+const BusinessOwner = require("../models/BusinessOwner");
+const Party = require("../models/Party");
+const GhausiaLot = require("../models/GhausiaLot");
+const Payment = require("../models/Payment");
+const PartyEdit = require("../models/PartyEdit");
 const {
   getDataOwnerId,
   getOwnerFilter,
@@ -14,7 +14,7 @@ const {
   getBusinessOwnerFilter,
   isParty,
   isTenantAdmin,
-} = require('../utils/access');
+} = require("../utils/access");
 
 const mapPayment = (doc) => ({ ...doc, id: String(doc._id) });
 const mapOwner = (doc) => ({ ...doc, id: String(doc._id) });
@@ -35,8 +35,8 @@ const paymentsFilter = (req, { scopeAll, partyScopeAll }) => {
     const partyMatch = partyScopeAll
       ? getPartyPaymentOrConditions(req.user)
       : [
-          { partyId: String(req.user.partyId || '') },
-          { party: req.user.partyName || '' },
+          { partyId: String(req.user.partyId || "") },
+          { party: req.user.partyName || "" },
         ];
     return {
       ...getOwnerFilter(req),
@@ -54,20 +54,25 @@ async function partyAllowedLotIds(req, partyScopeAll) {
   if (!isParty(req.user)) return null;
   if (partyScopeAll) {
     const lots = await GhausiaLot.find(getPartyAllBusinessLotsFilter(req.user))
-      .select('_id')
+      .select("_id")
       .lean();
     return lots.map((lot) => String(lot._id));
   }
   const lots = await GhausiaLot.find({
     userId: getDataOwnerId(req.user),
-    partyId: String(req.user.partyId || ''),
+    partyId: String(req.user.partyId || ""),
   })
-    .select('_id')
+    .select("_id")
     .lean();
   return lots.map((lot) => String(lot._id));
 }
 
-async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, precomputedLotIds) {
+async function fetchPartyEdits(
+  req,
+  { scopeAll, partyScopeAll },
+  receiptSelect,
+  precomputedLotIds,
+) {
   const partyLedgerAll = partyScopeAll && isParty(req.user);
   let allowedLotIds = null;
   if (precomputedLotIds !== undefined) {
@@ -77,7 +82,8 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
   }
 
   const allWorkspaces = scopeAll && isTenantAdmin(req.user);
-  const bizFilter = allWorkspaces || partyLedgerAll ? {} : getBusinessOwnerFilter(req);
+  const bizFilter =
+    allWorkspaces || partyLedgerAll ? {} : getBusinessOwnerFilter(req);
   const filter = {
     ...getOwnerFilter(req),
     ...bizFilter,
@@ -94,16 +100,16 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
     const [withReceipt, imageMeta] = await Promise.all([
       PartyEdit.find({
         ...filter,
-        receipt: { $exists: true, $nin: ['', null] },
+        receipt: { $exists: true, $nin: ["", null] },
       })
-        .select('_id')
+        .select("_id")
         .lean(),
       PartyEdit.aggregate([
         { $match: filter },
         {
           $project: {
             _id: 1,
-            lotImagesCount: { $size: { $ifNull: ['$lotImages', []] } },
+            lotImagesCount: { $size: { $ifNull: ["$lotImages", []] } },
           },
         },
       ]),
@@ -124,10 +130,12 @@ async function fetchPartyEdits(req, { scopeAll, partyScopeAll }, receiptSelect, 
   }
 
   return rows.map((doc) => {
-    const lotImagesCount = Array.isArray(doc.lotImages) ? doc.lotImages.length : 0;
+    const lotImagesCount = Array.isArray(doc.lotImages)
+      ? doc.lotImages.length
+      : 0;
     return {
       ...mapPartyEdit(doc),
-      hasReceipt: typeof doc.receipt === 'string' && doc.receipt.trim() !== '',
+      hasReceipt: typeof doc.receipt === "string" && doc.receipt.trim() !== "",
       hasLotImages: lotImagesCount > 0,
       lotImagesCount,
     };
@@ -139,9 +147,9 @@ function attachOwnerNames(lots, ownerNameMap) {
   return lots.map((lot) => {
     const rawId = lot.businessOwnerId;
     const oid =
-      rawId != null && typeof rawId === 'object'
-        ? String(rawId._id ?? rawId.id ?? '')
-        : String(rawId ?? '');
+      rawId != null && typeof rawId === "object"
+        ? String(rawId._id ?? rawId.id ?? "")
+        : String(rawId ?? "");
     const name = ownerNameMap.get(oid);
     if (!name) return lot;
     return { ...lot, businessOwnerId: { _id: oid, name } };
@@ -157,15 +165,18 @@ async function fetchGhausiaLots(req, opts, ownerNameMap) {
 async function fetchPayments(req, opts) {
   const filter = paymentsFilter(req, opts);
   // Slip images are excluded here (loaded lazily via GET /payments/:id); hasReceipt flags presence.
-  const rows = await Payment.find(filter).select('-receipt').sort({ createdAt: -1 }).lean();
+  const rows = await Payment.find(filter)
+    .select("-receipt")
+    .sort({ createdAt: -1 })
+    .lean();
   const missingFlag = rows.filter((d) => d.hasReceipt !== true);
   let slipIds = new Set();
   if (missingFlag.length) {
     const withSlip = await Payment.find({
       _id: { $in: missingFlag.map((d) => d._id) },
-      receipt: { $exists: true, $nin: ['', null] },
+      receipt: { $exists: true, $nin: ["", null] },
     })
-      .select('_id')
+      .select("_id")
       .lean();
     slipIds = new Set(withSlip.map((d) => String(d._id)));
   }
@@ -182,32 +193,37 @@ function partyBusinessOwnersFromLots(lotArrays, ownerNameMap) {
     for (const lot of lots || []) {
       const raw = lot.businessOwnerId;
       const id =
-        raw != null && typeof raw === 'object'
-          ? String(raw._id ?? raw.id ?? '')
-          : String(raw ?? '');
+        raw != null && typeof raw === "object"
+          ? String(raw._id ?? raw.id ?? "")
+          : String(raw ?? "");
       if (!id || seen.has(id)) continue;
       const name =
-        ownerNameMap.get(id)
-        || (raw != null && typeof raw === 'object' ? String(raw.name ?? '').trim() : '');
+        ownerNameMap.get(id) ||
+        (raw != null && typeof raw === "object"
+          ? String(raw.name ?? "").trim()
+          : "");
       seen.set(id, { _id: id, id, name });
     }
   }
   return [...seen.values()];
 }
 
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     const includeReceipts =
-      String(req.query.includeReceipts || '').toLowerCase() === '1'
-      || req.query.includeReceipts === 'true';
+      String(req.query.includeReceipts || "").toLowerCase() === "1" ||
+      req.query.includeReceipts === "true";
     const minimal =
-      String(req.query.minimal || '').toLowerCase() === '1'
-      || req.query.minimal === 'true';
-    const receiptSelect = includeReceipts ? '' : '-receipt -lotImages';
+      String(req.query.minimal || "").toLowerCase() === "1" ||
+      req.query.minimal === "true";
+    const receiptSelect = includeReceipts ? "" : "-receipt -lotImages";
 
     if (isTenantAdmin(req.user)) {
       const userId = getDataOwnerId(req.user);
-      const businessOwners = await BusinessOwner.find({ userId, status: 'active' })
+      const businessOwners = await BusinessOwner.find({
+        userId,
+        status: "active",
+      })
         .sort({ isDefault: -1, createdAt: 1 })
         .lean();
       const ownerNameMap = new Map(
@@ -215,12 +231,21 @@ router.get('/', async (req, res) => {
       );
 
       if (minimal) {
-        const [parties, reportingLots, reportingPayments, reportingPartyEdits] = await Promise.all([
-          Party.find({ userId }).sort({ name: 1 }).lean(),
-          fetchGhausiaLots(req, { scopeAll: true, partyScopeAll: false }, ownerNameMap),
-          fetchPayments(req, { scopeAll: true, partyScopeAll: false }),
-          fetchPartyEdits(req, { scopeAll: true, partyScopeAll: false }, receiptSelect),
-        ]);
+        const [parties, reportingLots, reportingPayments, reportingPartyEdits] =
+          await Promise.all([
+            Party.find({ userId }).sort({ name: 1 }).lean(),
+            fetchGhausiaLots(
+              req,
+              { scopeAll: true, partyScopeAll: false },
+              ownerNameMap,
+            ),
+            fetchPayments(req, { scopeAll: true, partyScopeAll: false }),
+            fetchPartyEdits(
+              req,
+              { scopeAll: true, partyScopeAll: false },
+              receiptSelect,
+            ),
+          ]);
 
         return res.json({
           businessOwners: businessOwners.map(mapOwner),
@@ -243,12 +268,28 @@ router.get('/', async (req, res) => {
         reportingPartyEdits,
       ] = await Promise.all([
         Party.find({ userId }).sort({ name: 1 }).lean(),
-        fetchGhausiaLots(req, { scopeAll: false, partyScopeAll: false }, ownerNameMap),
+        fetchGhausiaLots(
+          req,
+          { scopeAll: false, partyScopeAll: false },
+          ownerNameMap,
+        ),
         fetchPayments(req, { scopeAll: false, partyScopeAll: false }),
-        fetchPartyEdits(req, { scopeAll: false, partyScopeAll: false }, receiptSelect),
-        fetchGhausiaLots(req, { scopeAll: true, partyScopeAll: false }, ownerNameMap),
+        fetchPartyEdits(
+          req,
+          { scopeAll: false, partyScopeAll: false },
+          receiptSelect,
+        ),
+        fetchGhausiaLots(
+          req,
+          { scopeAll: true, partyScopeAll: false },
+          ownerNameMap,
+        ),
         fetchPayments(req, { scopeAll: true, partyScopeAll: false }),
-        fetchPartyEdits(req, { scopeAll: true, partyScopeAll: false }, receiptSelect),
+        fetchPartyEdits(
+          req,
+          { scopeAll: true, partyScopeAll: false },
+          receiptSelect,
+        ),
       ]);
 
       return res.json({
@@ -276,21 +317,38 @@ router.get('/', async (req, res) => {
       );
 
       if (minimal) {
-        const [parties, partyCrossLots, partyCrossPayments, partyCrossPartyEdits] = await Promise.all([
+        const [
+          parties,
+          partyCrossLots,
+          partyCrossPayments,
+          partyCrossPartyEdits,
+        ] = await Promise.all([
           Party.find({
             userId: getDataOwnerId(req.user),
             _id: req.user.partyId,
           })
             .sort({ name: 1 })
             .lean(),
-          fetchGhausiaLots(req, { scopeAll: false, partyScopeAll: true }, ownerNameMap),
+          fetchGhausiaLots(
+            req,
+            { scopeAll: false, partyScopeAll: true },
+            ownerNameMap,
+          ),
           fetchPayments(req, { scopeAll: false, partyScopeAll: true }),
-          fetchPartyEdits(req, { scopeAll: false, partyScopeAll: true }, receiptSelect, crossLotIds),
+          fetchPartyEdits(
+            req,
+            { scopeAll: false, partyScopeAll: true },
+            receiptSelect,
+            crossLotIds,
+          ),
         ]);
 
         return res.json({
           parties,
-          businessOwners: partyBusinessOwnersFromLots([partyCrossLots], ownerNameMap),
+          businessOwners: partyBusinessOwnersFromLots(
+            [partyCrossLots],
+            ownerNameMap,
+          ),
           partyCross: {
             lots: partyCrossLots,
             payments: partyCrossPayments,
@@ -314,17 +372,38 @@ router.get('/', async (req, res) => {
         })
           .sort({ name: 1 })
           .lean(),
-        fetchGhausiaLots(req, { scopeAll: false, partyScopeAll: false }, ownerNameMap),
+        fetchGhausiaLots(
+          req,
+          { scopeAll: false, partyScopeAll: false },
+          ownerNameMap,
+        ),
         fetchPayments(req, { scopeAll: false, partyScopeAll: false }),
-        fetchPartyEdits(req, { scopeAll: false, partyScopeAll: false }, receiptSelect, workspaceLotIds),
-        fetchGhausiaLots(req, { scopeAll: false, partyScopeAll: true }, ownerNameMap),
+        fetchPartyEdits(
+          req,
+          { scopeAll: false, partyScopeAll: false },
+          receiptSelect,
+          workspaceLotIds,
+        ),
+        fetchGhausiaLots(
+          req,
+          { scopeAll: false, partyScopeAll: true },
+          ownerNameMap,
+        ),
         fetchPayments(req, { scopeAll: false, partyScopeAll: true }),
-        fetchPartyEdits(req, { scopeAll: false, partyScopeAll: true }, receiptSelect, crossLotIds),
+        fetchPartyEdits(
+          req,
+          { scopeAll: false, partyScopeAll: true },
+          receiptSelect,
+          crossLotIds,
+        ),
       ]);
 
       return res.json({
         parties,
-        businessOwners: partyBusinessOwnersFromLots([partyCrossLots, ghausiaLots], ownerNameMap),
+        businessOwners: partyBusinessOwnersFromLots(
+          [partyCrossLots, ghausiaLots],
+          ownerNameMap,
+        ),
         ghausiaLots,
         payments,
         partyEdits,
@@ -338,7 +417,9 @@ router.get('/', async (req, res) => {
 
     return res.json({});
   } catch (error) {
-    res.status(500).json({ message: 'Error loading bootstrap data', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error loading bootstrap data", error: error.message });
   }
 });
 

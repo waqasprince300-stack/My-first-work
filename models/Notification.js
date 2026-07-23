@@ -1,28 +1,28 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
 const notificationSchema = new mongoose.Schema(
   {
     userId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       required: true,
       index: true,
     },
     ownerId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User',
+      ref: "User",
       required: true,
       index: true,
     },
     type: {
       type: String,
       enum: [
-        'lot_rejected',
-        'lot_pending_review',
-        'bill_revision_request',
-        'bill_revision_approved',
-        'bill_revision_rejected',
-        'payment_recorded',
+        "lot_rejected",
+        "lot_pending_review",
+        "bill_revision_request",
+        "bill_revision_approved",
+        "bill_revision_rejected",
+        "payment_recorded",
       ],
       required: true,
     },
@@ -33,25 +33,25 @@ const notificationSchema = new mongoose.Schema(
     },
     body: {
       type: String,
-      default: '',
+      default: "",
       trim: true,
     },
     lotId: {
       type: String,
-      default: '',
+      default: "",
       index: true,
     },
     lotNumber: {
       type: String,
-      default: '',
+      default: "",
     },
     businessOwnerId: {
       type: String,
-      default: '',
+      default: "",
     },
     linkPath: {
       type: String,
-      default: '',
+      default: "",
     },
     readAt: {
       type: Date,
@@ -69,4 +69,4 @@ notificationSchema.index({ userId: 1, createdAt: -1 });
 notificationSchema.index({ userId: 1, readAt: 1 });
 notificationSchema.index({ userId: 1, type: 1, lotId: 1, readAt: 1 });
 
-module.exports = mongoose.model('Notification', notificationSchema);
+module.exports = mongoose.model("Notification", notificationSchema);

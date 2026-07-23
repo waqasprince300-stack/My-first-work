@@ -6,10 +6,14 @@ function parsePaginationQuery(req, defaultLimit = DEFAULT_LIMIT) {
   if (!hasPage) {
     return { paginate: false };
   }
-  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
   const limit = Math.min(
     MAX_LIMIT,
-    Math.max(1, parseInt(String(req.query.limit || String(defaultLimit)), 10) || defaultLimit),
+    Math.max(
+      1,
+      parseInt(String(req.query.limit || String(defaultLimit)), 10) ||
+        defaultLimit,
+    ),
   );
   return {
     paginate: true,

@@ -1,5 +1,5 @@
-const mongoose = require('mongoose');
-const { resolveMongoSrvViaDoh } = require('./resolveMongoSrvViaDoh');
+const mongoose = require("mongoose");
+const { resolveMongoSrvViaDoh } = require("./resolveMongoSrvViaDoh");
 
 /**
  * Shared MongoDB connection options so scripts use the same database as the API
@@ -14,7 +14,8 @@ function getMongooseConnectOptions(overrides = {}) {
   return opts;
 }
 
-const dnsFailure = (msg) => /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i.test(String(msg || ''));
+const dnsFailure = (msg) =>
+  /queryTxt|querySrv|ETIMEOUT|ECONNREFUSED|ENOTFOUND/i.test(String(msg || ""));
 
 /**
  * Connect for CLI scripts: same dbName as server; optional DoH when mongodb+srv local DNS fails.
@@ -29,13 +30,17 @@ async function connectMongooseForScripts(uri, overrides = {}) {
     await mongoose.connect(uri, opts);
     return;
   } catch (err) {
-    const primaryIsSrv = uri.startsWith('mongodb+srv');
+    const primaryIsSrv = uri.startsWith("mongodb+srv");
     const fallbackUri = process.env.MONGODB_FALLBACK_URI?.trim();
     if (primaryIsSrv && fallbackUri && dnsFailure(err.message)) {
       await mongoose.connect(fallbackUri, opts);
       return;
     }
-    if (primaryIsSrv && dnsFailure(err.message) && process.env.MONGODB_DISABLE_DOH !== '1') {
+    if (
+      primaryIsSrv &&
+      dnsFailure(err.message) &&
+      process.env.MONGODB_DISABLE_DOH !== "1"
+    ) {
       const standard = await resolveMongoSrvViaDoh(uri);
       await mongoose.connect(standard, opts);
       return;

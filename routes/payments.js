@@ -1,26 +1,39 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const Payment = require('../models/Payment');
-const Party = require('../models/Party');
-const { getBusinessOwnerFilter, getDataOwnerId, getOwnerFilter, getPartyPaymentOrConditions, isParty, requireAdminUser, isTenantAdmin } = require('../utils/access');
-const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
-const { emitOrgChange } = require('../utils/realtime');
-const { notifyPaymentRecorded } = require('../utils/lotNotifications');
+const Payment = require("../models/Payment");
+const Party = require("../models/Party");
+const {
+  getBusinessOwnerFilter,
+  getDataOwnerId,
+  getOwnerFilter,
+  getPartyPaymentOrConditions,
+  isParty,
+  requireAdminUser,
+  isTenantAdmin,
+} = require("../utils/access");
+const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
+const { emitOrgChange } = require("../utils/realtime");
+const { notifyPaymentRecorded } = require("../utils/lotNotifications");
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
-const stripOwnership = ({ userId, ...data }) => data;
+const stripOwnership = ({ userId: _userId, ...data }) => data;
 
 /** Keep hasReceipt in sync with the stored slip so list/bootstrap can flag rows without the blob. */
 const withReceiptFlag = (data) => {
-  if (Object.prototype.hasOwnProperty.call(data, 'receipt')) {
-    data.hasReceipt = typeof data.receipt === 'string' && data.receipt.trim() !== '';
+  if (Object.prototype.hasOwnProperty.call(data, "receipt")) {
+    data.hasReceipt =
+      typeof data.receipt === "string" && data.receipt.trim() !== "";
   }
   return data;
 };
 
 const withPartyId = async (payload, userId) => {
   const data = { ...payload };
-  if (!data.partyId && data.party && String(data.party).toLowerCase() !== 'owner') {
+  if (
+    !data.partyId &&
+    data.party &&
+    String(data.party).toLowerCase() !== "owner"
+  ) {
     const party = await Party.findOne({ userId, name: data.party });
     if (party) data.partyId = String(party._id);
   }
@@ -28,19 +41,23 @@ const withPartyId = async (payload, userId) => {
 };
 
 // Get all payments
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const allWorkspaces = String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user);
+    const allWorkspaces =
+      String(req.query.scope || "").toLowerCase() === "all" &&
+      isTenantAdmin(req.user);
 
-    const partyAllBiz = String(req.query.partyScope || '').toLowerCase() === 'all' && isParty(req.user);
+    const partyAllBiz =
+      String(req.query.partyScope || "").toLowerCase() === "all" &&
+      isParty(req.user);
 
     let filter;
     if (isParty(req.user)) {
       const partyMatch = partyAllBiz
         ? getPartyPaymentOrConditions(req.user)
         : [
-            { partyId: String(req.user.partyId || '') },
-            { party: req.user.partyName || '' },
+            { partyId: String(req.user.partyId || "") },
+            { party: req.user.partyName || "" },
           ];
 
       filter = {
@@ -54,26 +71,33 @@ router.get('/', async (req, res) => {
       filter = { ...getOwnerFilter(req), ...getBusinessOwnerFilter(req) };
     }
 
-    const typeQ = String(req.query.type || '').trim();
+    const typeQ = String(req.query.type || "").trim();
     if (typeQ) filter.type = typeQ;
 
-    const bizOwnerQ = String(req.query.businessOwnerId || '').trim();
+    const bizOwnerQ = String(req.query.businessOwnerId || "").trim();
     if (bizOwnerQ) filter.businessOwnerId = bizOwnerQ;
 
-    const partyKind = String(req.query.partyKind || '').trim().toLowerCase();
-    if (partyKind === 'owner') {
+    const partyKind = String(req.query.partyKind || "")
+      .trim()
+      .toLowerCase();
+    if (partyKind === "owner") {
       filter.party = /^owner$/i;
-    } else if (partyKind === 'nonowner') {
+    } else if (partyKind === "nonowner") {
       filter.party = { $not: /^owner$/i };
     }
 
     const pagination = parsePaginationQuery(req);
     const sort = { createdAt: -1 };
     // Slip images are excluded from list payloads (loaded lazily per row via GET /payments/:id).
-    const listSelect = '-receipt';
+    const listSelect = "-receipt";
     if (pagination.paginate) {
       const [rows, total] = await Promise.all([
-        Payment.find(filter).select(listSelect).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        Payment.find(filter)
+          .select(listSelect)
+          .sort(sort)
+          .skip(pagination.skip)
+          .limit(pagination.limit)
+          .lean(),
         Payment.countDocuments(filter),
       ]);
       const missingFlag = rows.filter((d) => d.hasReceipt !== true);
@@ -81,9 +105,9 @@ router.get('/', async (req, res) => {
       if (missingFlag.length) {
         const withSlip = await Payment.find({
           _id: { $in: missingFlag.map((d) => d._id) },
-          receipt: { $exists: true, $nin: ['', null] },
+          receipt: { $exists: true, $nin: ["", null] },
         })
-          .select('_id')
+          .select("_id")
           .lean();
         slipIds = new Set(withSlip.map((d) => String(d._id)));
       }
@@ -100,15 +124,18 @@ router.get('/', async (req, res) => {
       );
     }
 
-    const payments = await Payment.find(filter).select(listSelect).sort(sort).lean();
+    const payments = await Payment.find(filter)
+      .select(listSelect)
+      .sort(sort)
+      .lean();
     const missingFlag = payments.filter((d) => d.hasReceipt !== true);
     let slipIds = new Set();
     if (missingFlag.length) {
       const withSlip = await Payment.find({
         _id: { $in: missingFlag.map((d) => d._id) },
-        receipt: { $exists: true, $nin: ['', null] },
+        receipt: { $exists: true, $nin: ["", null] },
       })
-        .select('_id')
+        .select("_id")
         .lean();
       slipIds = new Set(withSlip.map((d) => String(d._id)));
     }
@@ -120,12 +147,14 @@ router.get('/', async (req, res) => {
       })),
     );
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching payments', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching payments", error: error.message });
   }
 });
 
 // Get single payment
-router.get('/:id', async (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
     // Party payments span every workspace (same as partyScope=all list). Do not filter by
     // businessOwnerId here — that made slips visible in the list but 404 on open.
@@ -135,79 +164,105 @@ router.get('/:id', async (req, res) => {
           ...getOwnerFilter(req),
           $or: getPartyPaymentOrConditions(req.user),
         }
-      : { _id: req.params.id, ...getOwnerFilter(req), ...getBusinessOwnerFilter(req) };
+      : {
+          _id: req.params.id,
+          ...getOwnerFilter(req),
+          ...getBusinessOwnerFilter(req),
+        };
     const payment = await Payment.findOne(filter);
     if (!payment) {
-      return res.status(404).json({ message: 'Payment not found' });
+      return res.status(404).json({ message: "Payment not found" });
     }
     res.json(normalize(payment));
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching payment', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching payment", error: error.message });
   }
 });
 
 // Create payment
-router.post('/', async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const data = withReceiptFlag(await withPartyId(stripOwnership(req.body), userId));
-    const payment = new Payment({ ...data, userId, businessOwnerId: req.businessOwnerId });
+    const data = withReceiptFlag(
+      await withPartyId(stripOwnership(req.body), userId),
+    );
+    const payment = new Payment({
+      ...data,
+      userId,
+      businessOwnerId: req.businessOwnerId,
+    });
     const saved = await payment.save();
     res.status(201).json(normalize(saved));
     const paymentObj = saved.toObject ? saved.toObject() : saved;
-    const partyLabel = String(paymentObj.party || '').trim().toLowerCase();
-    const isPartyPayment = partyLabel && partyLabel !== 'owner';
+    const partyLabel = String(paymentObj.party || "")
+      .trim()
+      .toLowerCase();
+    const isPartyPayment = partyLabel && partyLabel !== "owner";
     if (isPartyPayment) {
-      const linkPath = '/payments';
-      emitOrgChange(req, 'payment', {
+      const linkPath = "/payments";
+      emitOrgChange(req, "payment", {
         paymentId: String(saved._id),
-        action: 'payment_recorded',
+        action: "payment_recorded",
         linkPath,
-        partyId: String(paymentObj.partyId || ''),
+        partyId: String(paymentObj.partyId || ""),
       });
       void notifyPaymentRecorded({ payment: paymentObj, ownerId: userId });
     } else {
-      emitOrgChange(req, 'payment', { paymentId: String(saved._id) });
+      emitOrgChange(req, "payment", { paymentId: String(saved._id) });
     }
   } catch (error) {
-    res.status(400).json({ message: 'Error creating payment', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Error creating payment", error: error.message });
   }
 });
 
 // Update payment
-router.patch('/:id', async (req, res) => {
+router.patch("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const data = withReceiptFlag(await withPartyId(stripOwnership(req.body), userId));
+    const data = withReceiptFlag(
+      await withPartyId(stripOwnership(req.body), userId),
+    );
     const payment = await Payment.findOneAndUpdate(
       { _id: req.params.id, userId, businessOwnerId: req.businessOwnerId },
       data,
-      { new: true, runValidators: true }
+      { new: true, runValidators: true },
     );
     if (!payment) {
-      return res.status(404).json({ message: 'Payment not found' });
+      return res.status(404).json({ message: "Payment not found" });
     }
     res.json(normalize(payment));
-    emitOrgChange(req, 'payment', { paymentId: String(payment._id) });
+    emitOrgChange(req, "payment", { paymentId: String(payment._id) });
   } catch (error) {
-    res.status(400).json({ message: 'Error updating payment', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Error updating payment", error: error.message });
   }
 });
 
 // Delete payment
-router.delete('/:id', async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
-    const payment = await Payment.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
+    const payment = await Payment.findOneAndDelete({
+      _id: req.params.id,
+      userId: getDataOwnerId(req.user),
+      businessOwnerId: req.businessOwnerId,
+    });
     if (!payment) {
-      return res.status(404).json({ message: 'Payment not found' });
+      return res.status(404).json({ message: "Payment not found" });
     }
-    res.json({ message: 'Payment deleted successfully' });
-    emitOrgChange(req, 'payment', { paymentId: String(payment._id) });
+    res.json({ message: "Payment deleted successfully" });
+    emitOrgChange(req, "payment", { paymentId: String(payment._id) });
   } catch (error) {
-    res.status(500).json({ message: 'Error deleting payment', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error deleting payment", error: error.message });
   }
 });
 

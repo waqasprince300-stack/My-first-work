@@ -5,41 +5,46 @@
 
 /** Domains that must not be used for signup (includes common disposable providers). */
 const BLOCKED_DOMAIN_SUFFIXES = [
-  'example.com',
-  'example.org',
-  'example.net',
-  'example.edu',
-  'test.com',
-  'test.org',
-  'localhost',
-  'invalid',
-  'mailinator.com',
-  'yopmail.com',
-  'yopmail.fr',
-  'guerrillamail.com',
-  'guerrillamail.biz',
-  '10minutemail.com',
-  'tempmail.com',
-  'temp-mail.org',
-  'throwaway.email',
-  'trashmail.com',
-  'fakeinbox.com',
-  'mailnesia.com',
-  'getnada.com',
-  'dispostable.com',
-  'sharklasers.com',
-  'emailondeck.com',
-  'mohmal.com',
+  "example.com",
+  "example.org",
+  "example.net",
+  "example.edu",
+  "test.com",
+  "test.org",
+  "localhost",
+  "invalid",
+  "mailinator.com",
+  "yopmail.com",
+  "yopmail.fr",
+  "guerrillamail.com",
+  "guerrillamail.biz",
+  "10minutemail.com",
+  "tempmail.com",
+  "temp-mail.org",
+  "throwaway.email",
+  "trashmail.com",
+  "fakeinbox.com",
+  "mailnesia.com",
+  "getnada.com",
+  "dispostable.com",
+  "sharklasers.com",
+  "emailondeck.com",
+  "mohmal.com",
 ];
 
 const EMAIL_SHAPE =
   /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
 function domainMatchesBlocklist(domainLower) {
-  const d = String(domainLower || '').toLowerCase();
+  const d = String(domainLower || "").toLowerCase();
   if (!d) return true;
 
-  if (d === 'local' || d.endsWith('.local') || d.endsWith('.invalid') || d.endsWith('.test')) {
+  if (
+    d === "local" ||
+    d.endsWith(".local") ||
+    d.endsWith(".invalid") ||
+    d.endsWith(".test")
+  ) {
     return true;
   }
 
@@ -61,29 +66,29 @@ function domainMatchesBlocklist(domainLower) {
  * @returns {string|null} Error message, or null if acceptable.
  */
 function getRegistrationEmailError(email) {
-  if (email == null || String(email).trim() === '') {
-    return 'Email is required';
+  if (email == null || String(email).trim() === "") {
+    return "Email is required";
   }
 
   const normalized = String(email).trim().toLowerCase();
 
   if (normalized.length > 254) {
-    return 'Email address is too long';
+    return "Email address is too long";
   }
 
-  const at = normalized.lastIndexOf('@');
+  const at = normalized.lastIndexOf("@");
   if (at <= 0 || at === normalized.length - 1) {
-    return 'Enter a valid email address with a domain (e.g. name@yourcompany.com)';
+    return "Enter a valid email address with a domain (e.g. name@yourcompany.com)";
   }
 
   const domain = normalized.slice(at + 1);
 
   if (!EMAIL_SHAPE.test(normalized)) {
-    return 'Enter a valid email address';
+    return "Enter a valid email address";
   }
 
   if (domainMatchesBlocklist(domain)) {
-    return 'Example, disposable, or test email domains cannot be used. Register with a real work or personal email you control.';
+    return "Example, disposable, or test email domains cannot be used. Register with a real work or personal email you control.";
   }
 
   return null;

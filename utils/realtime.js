@@ -1,4 +1,4 @@
-const { getDataOwnerId } = require('./access');
+const { getDataOwnerId } = require("./access");
 
 /** Socket.io room that contains an org's admin + all of its party users. */
 const orgRoom = (ownerId) => `org:${String(ownerId)}`;
@@ -14,8 +14,8 @@ const emitOrgChange = (req, type, extra = {}) => {
     if (!io || !req.user) return;
     const ownerId = getDataOwnerId(req.user);
     if (!ownerId) return;
-    io.to(orgRoom(ownerId)).emit('data:changed', {
-      type: type || 'data',
+    io.to(orgRoom(ownerId)).emit("data:changed", {
+      type: type || "data",
       ownerId: String(ownerId),
       at: Date.now(),
       ...extra,

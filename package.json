@@ -9,7 +9,9 @@
     "migrate": "node scripts/migrate.js",
     "migrate:lot-indexes": "node scripts/fix-ghausia-lot-lotnumber-index.js",
     "seed:admin": "node scripts/seed-admin.js",
-    "promote:super-admin": "node scripts/promote-super-admin.js"
+    "promote:super-admin": "node scripts/promote-super-admin.js",
+    "lint": "eslint .",
+    "format": "prettier --write \"**/*.{js,json,md}\""
   },
   "keywords": [
     "textile",
@@ -34,6 +36,9 @@
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.2.0",
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.0.0"
   }
 }

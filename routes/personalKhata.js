@@ -1,7 +1,7 @@
-const express = require('express');
-const PersonalKhata = require('../models/PersonalKhata');
-const authenticate = require('../middleware/auth');
-const { requireApproved } = require('../middleware/auth');
+const express = require("express");
+const PersonalKhata = require("../models/PersonalKhata");
+const authenticate = require("../middleware/auth");
+const { requireApproved } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -11,7 +11,7 @@ const defaultKhataState = () => {
     businesses: [
       {
         id: firstId,
-        name: 'Main business',
+        name: "Main business",
         createdAt: new Date().toISOString(),
       },
     ],
@@ -25,13 +25,16 @@ const sanitizeKhataPayload = (body = {}) => {
   const businesses = Array.isArray(body.businesses) ? body.businesses : [];
   const contacts = Array.isArray(body.contacts) ? body.contacts : [];
   const entries = Array.isArray(body.entries) ? body.entries : [];
-  let activeBusinessId = String(body.activeBusinessId || '').trim();
+  let activeBusinessId = String(body.activeBusinessId || "").trim();
 
   const normalizedBusinesses = businesses.length
     ? businesses
     : defaultKhataState().businesses;
 
-  if (!activeBusinessId || !normalizedBusinesses.some((b) => b.id === activeBusinessId)) {
+  if (
+    !activeBusinessId ||
+    !normalizedBusinesses.some((b) => b.id === activeBusinessId)
+  ) {
     activeBusinessId = normalizedBusinesses[0].id;
   }
 
@@ -51,7 +54,7 @@ const toResponse = (doc) => ({
   updatedAt: doc.updatedAt,
 });
 
-router.get('/', authenticate, requireApproved, async (req, res) => {
+router.get("/", authenticate, requireApproved, async (req, res) => {
   try {
     // Every approved account (admin, party, personal_khata) gets its own
     // server-synced Personal Khata, keyed by user id.
@@ -67,11 +70,13 @@ router.get('/', authenticate, requireApproved, async (req, res) => {
 
     res.json(toResponse(doc));
   } catch (error) {
-    res.status(500).json({ message: 'Error loading Personal Khata', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error loading Personal Khata", error: error.message });
   }
 });
 
-router.put('/', authenticate, requireApproved, async (req, res) => {
+router.put("/", authenticate, requireApproved, async (req, res) => {
   try {
     const payload = sanitizeKhataPayload(req.body);
 
@@ -89,7 +94,9 @@ router.put('/', authenticate, requireApproved, async (req, res) => {
 
     res.json(toResponse(doc));
   } catch (error) {
-    res.status(500).json({ message: 'Error saving Personal Khata', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error saving Personal Khata", error: error.message });
   }
 });
 

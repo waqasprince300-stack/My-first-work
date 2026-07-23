@@ -1,8 +1,8 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const GhausiaLot = require('../models/GhausiaLot');
-const Party = require('../models/Party');
-const Payment = require('../models/Payment');
+const GhausiaLot = require("../models/GhausiaLot");
+const Party = require("../models/Party");
+const Payment = require("../models/Payment");
 const {
   getDataOwnerId,
   getScopedFilter,
@@ -10,18 +10,22 @@ const {
   getPartyPaymentOrConditions,
   isParty,
   isTenantAdmin,
-} = require('../utils/access');
+} = require("../utils/access");
 
 const normalizeStatusKey = (status) => {
-  const s = String(status || 'pending').toLowerCase().trim();
-  if (s === 'receivedback') return 'received back';
-  if (s === 'inprogress') return 'in progress';
-  if (s === 'pendingapproval') return 'pending approval';
+  const s = String(status || "pending")
+    .toLowerCase()
+    .trim();
+  if (s === "receivedback") return "received back";
+  if (s === "inprogress") return "in progress";
+  if (s === "pendingapproval") return "pending approval";
   return s;
 };
 
 const lotFilterForSummary = (req) => {
-  const scopeAll = String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user);
+  const scopeAll =
+    String(req.query.scope || "").toLowerCase() === "all" &&
+    isTenantAdmin(req.user);
   if (isParty(req.user)) {
     return getPartyAllBusinessLotsFilter(req.user);
   }
@@ -32,7 +36,9 @@ const lotFilterForSummary = (req) => {
 };
 
 const paymentFilterForSummary = (req) => {
-  const scopeAll = String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user);
+  const scopeAll =
+    String(req.query.scope || "").toLowerCase() === "all" &&
+    isTenantAdmin(req.user);
   if (isParty(req.user)) {
     return {
       userId: getDataOwnerId(req.user),
@@ -45,59 +51,63 @@ const paymentFilterForSummary = (req) => {
   return getScopedFilter(req);
 };
 
-router.get('/summary', async (req, res) => {
+router.get("/summary", async (req, res) => {
   try {
     const lotFilter = lotFilterForSummary(req);
     const paymentFilter = paymentFilterForSummary(req);
     const userId = getDataOwnerId(req.user);
 
-    const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds] = await Promise.all([
-      GhausiaLot.aggregate([
-        { $match: lotFilter },
-        {
-          $group: {
-            _id: '$status',
-            count: { $sum: 1 },
-            billAmount: { $sum: { $ifNull: ['$billAmount', 0] } },
+    const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds] =
+      await Promise.all([
+        GhausiaLot.aggregate([
+          { $match: lotFilter },
+          {
+            $group: {
+              _id: "$status",
+              count: { $sum: 1 },
+              billAmount: { $sum: { $ifNull: ["$billAmount", 0] } },
+            },
           },
-        },
-      ]),
-      Payment.aggregate([
-        { $match: paymentFilter },
-        {
-          $group: {
-            _id: '$type',
-            total: { $sum: { $ifNull: ['$amount', 0] } },
-            count: { $sum: 1 },
+        ]),
+        Payment.aggregate([
+          { $match: paymentFilter },
+          {
+            $group: {
+              _id: "$type",
+              total: { $sum: { $ifNull: ["$amount", 0] } },
+              count: { $sum: 1 },
+            },
           },
-        },
-      ]),
-      Payment.aggregate([
-        { $match: paymentFilter },
-        {
-          $project: {
-            type: 1,
-            amount: { $ifNull: ['$amount', 0] },
-            partyLower: {
-              $toLower: {
-                $trim: { input: { $ifNull: ['$party', ''] } },
+        ]),
+        Payment.aggregate([
+          { $match: paymentFilter },
+          {
+            $project: {
+              type: 1,
+              amount: { $ifNull: ["$amount", 0] },
+              partyLower: {
+                $toLower: {
+                  $trim: { input: { $ifNull: ["$party", ""] } },
+                },
               },
             },
           },
-        },
-        {
-          $group: {
-            _id: { type: '$type', isOwner: { $eq: ['$partyLower', 'owner'] } },
-            total: { $sum: '$amount' },
-            count: { $sum: 1 },
+          {
+            $group: {
+              _id: {
+                type: "$type",
+                isOwner: { $eq: ["$partyLower", "owner"] },
+              },
+              total: { $sum: "$amount" },
+              count: { $sum: 1 },
+            },
           },
-        },
-      ]),
-      GhausiaLot.distinct('partyId', {
-        ...lotFilter,
-        partyId: { $exists: true, $nin: ['', null] },
-      }),
-    ]);
+        ]),
+        GhausiaLot.distinct("partyId", {
+          ...lotFilter,
+          partyId: { $exists: true, $nin: ["", null] },
+        }),
+      ]);
 
     const byStatus = {};
     let totalLots = 0;
@@ -109,24 +119,22 @@ router.get('/summary', async (req, res) => {
       totalLotValue += Number(row.billAmount || 0);
     });
 
-    const billableCount = byStatus['received back'] || 0;
+    const billableCount = byStatus["received back"] || 0;
     const billableTotal = statusAgg
-      .filter((row) => normalizeStatusKey(row._id) === 'received back')
+      .filter((row) => normalizeStatusKey(row._id) === "received back")
       .reduce((sum, row) => sum + Number(row.billAmount || 0), 0);
     const completedTotal = statusAgg
-      .filter((row) => normalizeStatusKey(row._id) === 'completed')
+      .filter((row) => normalizeStatusKey(row._id) === "completed")
       .reduce((sum, row) => sum + Number(row.billAmount || 0), 0);
 
     const ownerIn = paymentAgg
-      .filter((row) => String(row._id) === 'Received')
+      .filter((row) => String(row._id) === "Received")
       .reduce((sum, row) => sum + Number(row.total || 0), 0);
     const paidOut = paymentAgg
-      .filter((row) => String(row._id) === 'Paid')
+      .filter((row) => String(row._id) === "Paid")
       .reduce((sum, row) => sum + Number(row.total || 0), 0);
 
-    const partyPaidTotal = isParty(req.user)
-      ? paidOut
-      : 0;
+    const partyPaidTotal = isParty(req.user) ? paidOut : 0;
 
     let receivedFromOwner = 0;
     let receivedFromParties = 0;
@@ -135,17 +143,17 @@ router.get('/summary', async (req, res) => {
     let paymentCount = 0;
 
     paymentDetailAgg.forEach((row) => {
-      const type = String(row._id?.type || '');
+      const type = String(row._id?.type || "");
       const isOwner = Boolean(row._id?.isOwner);
       const total = Number(row.total || 0);
       const count = Number(row.count || 0);
       paymentCount += count;
-      if (type === 'Received' && isOwner) receivedFromOwner += total;
-      if (type === 'Received' && !isOwner) {
+      if (type === "Received" && isOwner) receivedFromOwner += total;
+      if (type === "Received" && !isOwner) {
         receivedFromParties += total;
         if (isParty(req.user)) partyReceivedTotal += total;
       }
-      if (type === 'Paid' && !isOwner) paidToNonOwnerParties += total;
+      if (type === "Paid" && !isOwner) paidToNonOwnerParties += total;
     });
 
     res.json({
@@ -153,11 +161,11 @@ router.get('/summary', async (req, res) => {
         totalLots,
         pending: byStatus.pending || 0,
         dispatched: byStatus.dispatched || 0,
-        pendingApproval: byStatus['pending approval'] || 0,
+        pendingApproval: byStatus["pending approval"] || 0,
         rejected: byStatus.rejected || 0,
-        receivedBack: byStatus['received back'] || 0,
+        receivedBack: byStatus["received back"] || 0,
         completed: byStatus.completed || 0,
-        inProgress: byStatus['in progress'] || 0,
+        inProgress: byStatus["in progress"] || 0,
       },
       finance: {
         totalLotValue,
@@ -173,21 +181,28 @@ router.get('/summary', async (req, res) => {
         paidToNonOwnerParties,
         paymentCount,
         partyReceivedTotal,
-        netBalance: receivedFromOwner + receivedFromParties - paidToNonOwnerParties,
+        netBalance:
+          receivedFromOwner + receivedFromParties - paidToNonOwnerParties,
       },
       parties: {
         activeWithLots: activePartyIds.filter(Boolean).length,
         totalParties: isParty(req.user)
           ? 1
           : await Party.countDocuments(
-            String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user)
-              ? { userId }
-              : getScopedFilter(req),
-          ),
+              String(req.query.scope || "").toLowerCase() === "all" &&
+                isTenantAdmin(req.user)
+                ? { userId }
+                : getScopedFilter(req),
+            ),
       },
     });
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching dashboard summary', error: error.message });
+    res
+      .status(500)
+      .json({
+        message: "Error fetching dashboard summary",
+        error: error.message,
+      });
   }
 });
 

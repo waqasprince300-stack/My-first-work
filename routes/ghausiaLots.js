@@ -1,42 +1,68 @@
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const GhausiaLot = require('../models/GhausiaLot');
-const Party = require('../models/Party');
-const PartyLedger = require('../models/PartyLedger');
-const PartyEdit = require('../models/PartyEdit');
-const { getDataOwnerId, getScopedFilter, getPartyAllBusinessLotsFilter, getPartyAccessibleLotFilter, escapeRegexString, isParty, requireAdminUser, isTenantAdmin, toObjectId } = require('../utils/access');
-const { parsePaginationQuery, paginatedJson } = require('../utils/pagination');
-const { emitOrgChange } = require('../utils/realtime');
-const { notifyLotRejected, notifyLotPendingReview } = require('../utils/lotNotifications');
+const GhausiaLot = require("../models/GhausiaLot");
+const Party = require("../models/Party");
+const PartyLedger = require("../models/PartyLedger");
+const PartyEdit = require("../models/PartyEdit");
+const {
+  getDataOwnerId,
+  getScopedFilter,
+  getPartyAllBusinessLotsFilter,
+  getPartyAccessibleLotFilter,
+  escapeRegexString,
+  isParty,
+  requireAdminUser,
+  isTenantAdmin,
+  toObjectId,
+} = require("../utils/access");
+const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
+const { emitOrgChange } = require("../utils/realtime");
+const {
+  notifyLotRejected,
+  notifyLotPendingReview,
+} = require("../utils/lotNotifications");
 
-const stripOwnership = ({ userId, ...data }) => data;
-const partyEditableLotFields = new Set(['status', 'dispatchDate', 'receivedBackDate']);
+const { toDateOrNull, toDateOrNow } = require("../utils/dateHelpers");
+
+const Joi = require("joi");
+
+const stripOwnership = ({ userId: _userId, ...data }) => data;
+const partyEditableLotFields = new Set([
+  "status",
+  "dispatchDate",
+  "receivedBackDate",
+]);
 
 const canonicalLotNumberFromDoc = (doc) =>
-  String(doc.lotNumber || doc.lotNo || '').trim();
+  String(doc.lotNumber || doc.lotNo || "").trim();
 
 /** Same workspace = same BusinessOwner document (string/ObjectId tolerant). */
 const sameBusinessWorkspace = (storedOwnerId, requestedOwnerId) =>
-  String(storedOwnerId ?? '') === String(requestedOwnerId ?? '');
+  String(storedOwnerId ?? "") === String(requestedOwnerId ?? "");
 
 /**
  * Lot numbers must be unique within one business collection only.
  * Query by userId + lot number then filter by businessOwnerId string match so
  * ObjectId vs string storage does not falsely block another collection.
  */
-const ensureLotNumberUniqueInCollection = async (userId, businessOwnerId, lotNumber, excludeId) => {
-  const trimmed = String(lotNumber || '').trim();
+const ensureLotNumberUniqueInCollection = async (
+  userId,
+  businessOwnerId,
+  lotNumber,
+  excludeId,
+) => {
+  const trimmed = String(lotNumber || "").trim();
   if (!trimmed) return;
 
-  const ownerReq = String(businessOwnerId || '').trim();
+  const ownerReq = String(businessOwnerId || "").trim();
   if (!ownerReq) {
-    const err = new Error('Select a business collection before saving lots.');
-    err.code = 'MISSING_BUSINESS_OWNER';
+    const err = new Error("Select a business collection before saving lots.");
+    err.code = "MISSING_BUSINESS_OWNER";
     throw err;
   }
 
   const escaped = escapeRegexString(trimmed);
-  const regex = new RegExp(`^${escaped}$`, 'i');
+  const regex = new RegExp(`^${escaped}$`, "i");
 
   const uid = toObjectId(userId);
   const exclude = excludeId ? toObjectId(excludeId) : null;
@@ -46,51 +72,78 @@ const ensureLotNumberUniqueInCollection = async (userId, businessOwnerId, lotNum
     $or: [{ lotNumber: regex }, { lotNo: regex }],
     ...(exclude ? { _id: { $ne: exclude } } : {}),
   })
-    .select('_id businessOwnerId lotNumber lotNo')
+    .select("_id businessOwnerId lotNumber lotNo")
     .lean();
 
-  const conflict = candidates.find((doc) => sameBusinessWorkspace(doc.businessOwnerId, ownerReq));
+  const conflict = candidates.find((doc) =>
+    sameBusinessWorkspace(doc.businessOwnerId, ownerReq),
+  );
   if (!conflict) return;
 
-  const err = new Error(`Lot number "${trimmed}" already exists in this collection. Use a different number, or switch to another business if this is intentional.`);
-  err.code = 'DUPLICATE_LOT_NUMBER';
+  const err = new Error(
+    `Lot number "${trimmed}" already exists in this collection. Use a different number, or switch to another business if this is intentional.`,
+  );
+  err.code = "DUPLICATE_LOT_NUMBER";
   throw err;
 };
 
 const normalizeStatus = (status) => {
-  if (!status) return 'pending';
+  if (!status) return "pending";
   const normalized = String(status).trim().toLowerCase();
-  if (normalized === 'receivedback') return 'received back';
-  if (normalized === 'inprogress') return 'in progress';
-  if (normalized === 'pendingapproval') return 'pending approval';
-  if (['pending', 'dispatched', 'received back', 'completed', 'in progress', 'pending approval', 'rejected'].includes(normalized)) {
+  if (normalized === "receivedback") return "received back";
+  if (normalized === "inprogress") return "in progress";
+  if (normalized === "pendingapproval") return "pending approval";
+  if (
+    [
+      "pending",
+      "dispatched",
+      "received back",
+      "completed",
+      "in progress",
+      "pending approval",
+      "rejected",
+    ].includes(normalized)
+  ) {
     return normalized;
   }
-  return 'pending';
+  return "pending";
 };
 
 const resolvePartyName = async (partyId, explicitName, userId) => {
-  const normalizedName = typeof explicitName === 'string' ? explicitName.trim() : '';
+  const normalizedName =
+    typeof explicitName === "string" ? explicitName.trim() : "";
   if (normalizedName) return normalizedName;
-  if (!partyId) return 'Unknown';
-  const party = await Party.findOne({ userId, $or: [{ _id: partyId }, { id: partyId }] });
-  return party?.name || 'Unknown';
+  if (!partyId) return "Unknown";
+  const party = await Party.findOne({
+    userId,
+    $or: [{ _id: partyId }, { id: partyId }],
+  });
+  return party?.name || "Unknown";
 };
 
 const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
-  const lotNo = payload.lotNo || payload.lotNumber || '';
-  const designNo = payload.designNo || '';
-  const fabric = payload.fabric === '__custom' ? payload.customFabric || '' : payload.fabric || payload.itemType || '';
+  const lotNo = payload.lotNo || payload.lotNumber || "";
+  const designNo = payload.designNo || "";
+  const fabric =
+    payload.fabric === "__custom"
+      ? payload.customFabric || ""
+      : payload.fabric || payload.itemType || "";
   const quantity = Number(payload.quantity ?? payload.pieces ?? 0);
   const billAmount = Number(payload.billAmount || payload.totalAmount || 0);
   const totalAmount = Number(payload.totalAmount ?? billAmount ?? 0);
-  const allotDate = payload.allotDate || payload.receivedDate || new Date().toISOString();
-  const dispatchDate = payload.dispatchDate || null;
-  const receivedBackDate = payload.receivedBackDate || null;
-  const status = normalizeStatus(payload.status || 'pending');
-  const notes = payload.description || payload.notes || '';
-  const partyId = payload.partyId ? String(payload.partyId) : '';
-  const partyName = await resolvePartyName(partyId, payload.partyName || payload.party || 'Unknown', userId);
+  const allotDate = toDateOrNow(
+    payload.allotDate ?? payload.receivedDate ?? new Date().toISOString(),
+  );
+  const dispatchDate = toDateOrNull(payload.dispatchDate);
+  const receivedBackDate = toDateOrNull(payload.receivedBackDate);
+  const status = normalizeStatus(payload.status || "pending");
+  const notes = payload.description || payload.notes || "";
+  const partyId = payload.partyId ? String(payload.partyId) : "";
+  const partyName = await resolvePartyName(
+    partyId,
+    payload.partyName || payload.party || "Unknown",
+    userId,
+  );
 
   return {
     userId,
@@ -99,26 +152,76 @@ const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
     designNo,
     description: notes,
     fabric,
-    customFabric: payload.customFabric || '',
+    customFabric: payload.customFabric || "",
     colors: Number(payload.colors || 0),
     pieces: Number(payload.pieces ?? payload.quantity ?? 0),
-    allotDate: new Date(allotDate),
+    allotDate,
     partyId,
     partyName,
     lotNumber: lotNo,
     itemType: payload.itemType || fabric,
     quantity,
-    unit: payload.unit || 'pieces',
+    unit: payload.unit || "pieces",
     rate: Number(payload.rate || 0),
     billAmount,
     totalAmount,
-    receivedDate: new Date(allotDate),
-    dispatchDate: dispatchDate ? new Date(dispatchDate) : null,
-    receivedBackDate: receivedBackDate ? new Date(receivedBackDate) : null,
+    receivedDate: allotDate,
+    dispatchDate: dispatchDate ? dispatchDate : null,
+    receivedBackDate: receivedBackDate ? receivedBackDate : null,
     status,
     notes,
   };
 };
+
+// Joi schemas for validating lot payloads
+const STATUS_VALUES = [
+  "pending",
+  "dispatched",
+  "received back",
+  "completed",
+  "in progress",
+  "pending approval",
+  "rejected",
+];
+const createLotSchema = Joi.object({
+  lotNumber: Joi.string().trim().required(),
+  designNo: Joi.string().allow("", null),
+  description: Joi.string().allow("", null),
+  itemType: Joi.string().allow("", null),
+  fabric: Joi.string().allow("", null),
+  colors: Joi.number().min(0).optional(),
+  pieces: Joi.number().min(0).optional(),
+  quantity: Joi.number().min(0).optional(),
+  allotDate: Joi.date().iso().allow("", null),
+  dispatchDate: Joi.date().iso().allow("", null),
+  receivedBackDate: Joi.date().iso().allow("", null),
+  status: Joi.string()
+    .valid(...STATUS_VALUES)
+    .optional(),
+  billAmount: Joi.number().min(0).optional(),
+  partyId: Joi.string().allow("", null).optional(),
+  partyName: Joi.string().allow("", null).optional(),
+});
+
+const updateLotSchema = Joi.object({
+  lotNumber: Joi.string().trim().optional(),
+  designNo: Joi.string().allow("", null).optional(),
+  description: Joi.string().allow("", null).optional(),
+  itemType: Joi.string().allow("", null).optional(),
+  fabric: Joi.string().allow("", null).optional(),
+  colors: Joi.number().min(0).optional(),
+  pieces: Joi.number().min(0).optional(),
+  quantity: Joi.number().min(0).optional(),
+  allotDate: Joi.date().iso().allow("", null).optional(),
+  dispatchDate: Joi.date().iso().allow("", null).optional(),
+  receivedBackDate: Joi.date().iso().allow("", null).optional(),
+  status: Joi.string()
+    .valid(...STATUS_VALUES)
+    .optional(),
+  billAmount: Joi.number().min(0).optional(),
+  partyId: Joi.string().allow("", null).optional(),
+  partyName: Joi.string().allow("", null).optional(),
+}).min(1);
 
 const normalizeLotUpdatePayload = async (payload, userId) => {
   const normalized = stripOwnership(payload);
@@ -136,7 +239,11 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
   }
 
   if (!normalized.partyName && normalized.partyId) {
-    normalized.partyName = await resolvePartyName(normalized.partyId, 'Unknown', userId);
+    normalized.partyName = await resolvePartyName(
+      normalized.partyId,
+      "Unknown",
+      userId,
+    );
   }
 
   if (payload.lotNumber || payload.lotNo) {
@@ -144,8 +251,8 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
     normalized.lotNo = payload.lotNumber || payload.lotNo;
   }
 
-  if (payload.fabric === '__custom') {
-    normalized.fabric = payload.customFabric || '';
+  if (payload.fabric === "__custom") {
+    normalized.fabric = payload.customFabric || "";
   }
 
   if (payload.quantity != null) {
@@ -158,15 +265,31 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
 
   if (payload.billAmount != null) {
     normalized.billAmount = Number(payload.billAmount);
-    if (payload.totalAmount == null) normalized.totalAmount = Number(payload.billAmount);
+    if (payload.totalAmount == null)
+      normalized.totalAmount = Number(payload.billAmount);
   }
 
   if (payload.totalAmount != null) {
     normalized.totalAmount = Number(payload.totalAmount);
   }
 
+  if (payload.allotDate !== undefined) {
+    normalized.allotDate = toDateOrNull(payload.allotDate);
+    if (normalized.allotDate && normalized.receivedDate == null) {
+      normalized.receivedDate = normalized.allotDate;
+    }
+  }
+
+  if (payload.dispatchDate !== undefined) {
+    normalized.dispatchDate = toDateOrNull(payload.dispatchDate);
+  }
+
+  if (payload.receivedBackDate !== undefined) {
+    normalized.receivedBackDate = toDateOrNull(payload.receivedBackDate);
+  }
+
   if (payload.rejectionNote !== undefined) {
-    normalized.rejectionNote = String(payload.rejectionNote || '').trim();
+    normalized.rejectionNote = String(payload.rejectionNote || "").trim();
   }
 
   return normalized;
@@ -174,7 +297,14 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
 
 const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   if (!lot.partyId || !lot.lotNumber) return;
-  const synced = ['dispatched', 'received back', 'completed', 'in progress', 'pending approval', 'rejected'];
+  const synced = [
+    "dispatched",
+    "received back",
+    "completed",
+    "in progress",
+    "pending approval",
+    "rejected",
+  ];
   const ls = normalizeStatus(lot.status);
   if (!synced.includes(ls)) return;
 
@@ -183,23 +313,27 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     businessOwnerId,
     lotId: lot.id || lot._id || lot.lotNumber,
     lotNumber: lot.lotNumber || lot.lotNo,
-    designNo: lot.designNo || '',
-    description: lot.description || lot.notes || '',
-    itemType: lot.itemType || lot.fabric || '',
+    designNo: lot.designNo || "",
+    description: lot.description || lot.notes || "",
+    itemType: lot.itemType || lot.fabric || "",
     colors: Number(lot.colors || 0),
     quantity: Number(lot.quantity ?? lot.pieces ?? 0),
     pieces: Number(lot.pieces ?? lot.quantity ?? 0),
-    allotDate: lot.allotDate ? new Date(lot.allotDate) : new Date(),
-    completeDate: lot.receivedBackDate ? new Date(lot.receivedBackDate) : null,
+    allotDate: toDateOrNow(lot.allotDate ?? lot.dispatchDate ?? new Date().toISOString()),
+    completeDate: lot.receivedBackDate ? toDateOrNull(lot.receivedBackDate) : null,
     partyId: lot.partyId,
-    partyName: lot.partyName || 'Unknown',
+    partyName: lot.partyName || "Unknown",
     status: ls,
     billAmount: Number(lot.billAmount || 0),
-    receipt: lot.receipt || '',
-    notes: lot.notes || '',
+    receipt: lot.receipt || "",
+    notes: lot.notes || "",
   };
 
-  const existing = await PartyLedger.findOne({ userId, businessOwnerId, $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }] });
+  const existing = await PartyLedger.findOne({
+    userId,
+    businessOwnerId,
+    $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }],
+  });
   if (existing) {
     Object.assign(existing, entryData);
     await existing.save();
@@ -212,10 +346,14 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
 };
 
 // Get all Ghausia lots
-router.get('/', async (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const partyAllBiz = String(req.query.partyScope || '').toLowerCase() === 'all' && isParty(req.user);
-    const allWorkspaces = String(req.query.scope || '').toLowerCase() === 'all' && isTenantAdmin(req.user);
+    const partyAllBiz =
+      String(req.query.partyScope || "").toLowerCase() === "all" &&
+      isParty(req.user);
+    const allWorkspaces =
+      String(req.query.scope || "").toLowerCase() === "all" &&
+      isTenantAdmin(req.user);
 
     let filter;
     if (partyAllBiz) {
@@ -226,44 +364,56 @@ router.get('/', async (req, res) => {
       filter = getScopedFilter(req);
     }
 
-    const statusQ = String(req.query.status || '').trim();
+    const statusQ = String(req.query.status || "").trim();
     if (statusQ) {
-      filter.status = new RegExp(`^${escapeRegexString(statusQ)}$`, 'i');
+      filter.status = new RegExp(`^${escapeRegexString(statusQ)}$`, "i");
     }
 
     const pagination = parsePaginationQuery(req);
     const sort = { receivedDate: -1 };
     if (pagination.paginate) {
       const [items, total] = await Promise.all([
-        GhausiaLot.find(filter).sort(sort).skip(pagination.skip).limit(pagination.limit).lean(),
+        GhausiaLot.find(filter)
+          .sort(sort)
+          .skip(pagination.skip)
+          .limit(pagination.limit)
+          .lean(),
         GhausiaLot.countDocuments(filter),
       ]);
-      return paginatedJson(res, items, total, pagination.page, pagination.limit);
+      return paginatedJson(
+        res,
+        items,
+        total,
+        pagination.page,
+        pagination.limit,
+      );
     }
 
     const lots = await GhausiaLot.find(filter).sort(sort).lean();
     res.json(lots);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching lots', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching lots", error: error.message });
   }
 });
 
 // Admin: approve party completion submission (pending approval → billable received back)
-router.post('/:id/approve-completion', async (req, res) => {
+router.post("/:id/approve-completion", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
     const lot = await GhausiaLot.findOne({ _id: req.params.id, userId });
     if (!lot) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
     const cur = normalizeStatus(lot.status);
-    if (cur !== 'pending approval') {
-      return res.status(400).json({ message: 'Lot is not awaiting approval' });
+    if (cur !== "pending approval") {
+      return res.status(400).json({ message: "Lot is not awaiting approval" });
     }
 
-    lot.status = 'received back';
-    lot.rejectionNote = '';
+    lot.status = "received back";
+    lot.rejectionNote = "";
     lot.completionApprovedAt = new Date();
 
     const lotIdStr = String(lot._id);
@@ -273,17 +423,19 @@ router.post('/:id/approve-completion', async (req, res) => {
       businessOwnerId: lot.businessOwnerId,
     });
 
-    const ownerBillingChoice = String(req.body?.ownerBillingChoice || '').trim();
+    const ownerBillingChoice = String(
+      req.body?.ownerBillingChoice || "",
+    ).trim();
     const partyBill = Number(peDoc?.partyBillAmount ?? 0);
-    if (ownerBillingChoice === 'sync_party') {
+    if (ownerBillingChoice === "sync_party") {
       lot.billAmount = partyBill;
-    } else if (ownerBillingChoice === 'custom_ghausia') {
+    } else if (ownerBillingChoice === "custom_ghausia") {
       const custom = Number(req.body?.ownerBillAmount);
       if (Number.isFinite(custom) && custom >= 0) {
         lot.billAmount = custom;
         lot.totalAmount = custom;
       }
-    } else if (ownerBillingChoice === 'delta_only' && peDoc?.pendingRevision) {
+    } else if (ownerBillingChoice === "delta_only" && peDoc?.pendingRevision) {
       const fromA = Number(peDoc.pendingRevision.fromAmount ?? 0);
       const toA = Number(peDoc.pendingRevision.toAmount ?? 0);
       const delta = toA - fromA;
@@ -300,7 +452,7 @@ router.post('/:id/approve-completion', async (req, res) => {
       },
       {
         $set: {
-          overrideStatus: 'Completed',
+          overrideStatus: "Completed",
           completeDate: lot.receivedBackDate || new Date(),
         },
         $setOnInsert: {
@@ -308,39 +460,49 @@ router.post('/:id/approve-completion', async (req, res) => {
           userId,
           businessOwnerId: lot.businessOwnerId,
         },
-        $unset: { pendingRevision: '' },
+        $unset: { pendingRevision: "" },
       },
       { upsert: true, new: true, runValidators: true },
     );
 
-    await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
+    await syncPartyLedgerForLot(
+      lot.toObject({ virtuals: true }),
+      userId,
+      lot.businessOwnerId,
+    );
     res.json(lot);
-    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+    emitOrgChange(req, "lot", { lotId: String(lot._id) });
   } catch (error) {
-    res.status(400).json({ message: 'Could not approve lot', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Could not approve lot", error: error.message });
   }
 });
 
 // Admin: reject party completion — lot becomes rejected until party resubmits
-router.post('/:id/reject-completion', async (req, res) => {
+router.post("/:id/reject-completion", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const note = String(req.body?.rejectionNote ?? req.body?.rejectionReason ?? '').trim();
+    const note = String(
+      req.body?.rejectionNote ?? req.body?.rejectionReason ?? "",
+    ).trim();
     if (!note) {
-      return res.status(400).json({ message: 'Rejection description is required' });
+      return res
+        .status(400)
+        .json({ message: "Rejection description is required" });
     }
 
     const lot = await GhausiaLot.findOne({ _id: req.params.id, userId });
     if (!lot) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
     const cur = normalizeStatus(lot.status);
-    if (cur !== 'pending approval') {
-      return res.status(400).json({ message: 'Lot is not awaiting approval' });
+    if (cur !== "pending approval") {
+      return res.status(400).json({ message: "Lot is not awaiting approval" });
     }
 
-    lot.status = 'rejected';
+    lot.status = "rejected";
     lot.rejectionNote = note;
     await lot.save();
 
@@ -353,86 +515,137 @@ router.post('/:id/reject-completion', async (req, res) => {
       },
       {
         $set: {
-          overrideStatus: 'Rejected',
+          overrideStatus: "Rejected",
         },
         $setOnInsert: {
           lotId: lotIdStr,
           userId,
           businessOwnerId: lot.businessOwnerId,
         },
-        $unset: { pendingRevision: '' },
+        $unset: { pendingRevision: "" },
       },
       { upsert: true, new: true, runValidators: true },
     );
 
-    await syncPartyLedgerForLot(lot.toObject({ virtuals: true }), userId, lot.businessOwnerId);
+    await syncPartyLedgerForLot(
+      lot.toObject({ virtuals: true }),
+      userId,
+      lot.businessOwnerId,
+    );
     res.json(lot);
     const lotObj = lot.toObject({ virtuals: true });
-    emitOrgChange(req, 'lot', {
+    emitOrgChange(req, "lot", {
       lotId: String(lot._id),
-      action: 'lot_rejected',
-      partyId: String(lot.partyId || ''),
+      action: "lot_rejected",
+      partyId: String(lot.partyId || ""),
       linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
     });
     void notifyLotRejected({ lot: lotObj, note, ownerId: userId });
   } catch (error) {
-    res.status(400).json({ message: 'Could not reject lot', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Could not reject lot", error: error.message });
   }
 });
 
 // Get single lot
-router.get('/:id', async (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
     const filter = isParty(req.user)
       ? getPartyAccessibleLotFilter(req.user, { _id: req.params.id })
       : getScopedFilter(req, { _id: req.params.id });
-    const lot = await GhausiaLot.findOne(filter).populate('businessOwnerId', 'name');
+    const lot = await GhausiaLot.findOne(filter).populate(
+      "businessOwnerId",
+      "name",
+    );
     if (!lot) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
     res.json(lot);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching lot', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error fetching lot", error: error.message });
   }
 });
 
 // Create lot
-router.post('/', async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const payload = await normalizeLotPayload(stripOwnership(req.body), userId, req.businessOwnerId);
-    await ensureLotNumberUniqueInCollection(userId, req.businessOwnerId, canonicalLotNumberFromDoc(payload));
+    // Validate incoming payload
+    const { error: createErr } = createLotSchema.validate(req.body, {
+      abortEarly: false,
+      allowUnknown: true,
+    });
+    if (createErr) {
+      return res
+        .status(400)
+        .json({
+          message: "Invalid lot payload",
+          details: createErr.details.map((d) => d.message),
+        });
+    }
+    const payload = await normalizeLotPayload(
+      stripOwnership(req.body),
+      userId,
+      req.businessOwnerId,
+    );
+    await ensureLotNumberUniqueInCollection(
+      userId,
+      req.businessOwnerId,
+      canonicalLotNumberFromDoc(payload),
+    );
 
     const lot = new GhausiaLot(payload);
     const savedLot = await lot.save();
     await syncPartyLedgerForLot(savedLot, userId, req.businessOwnerId);
     res.status(201).json(savedLot);
-    emitOrgChange(req, 'lot', { lotId: String(savedLot._id) });
+    emitOrgChange(req, "lot", { lotId: String(savedLot._id) });
   } catch (error) {
-    if (error.code === 'DUPLICATE_LOT_NUMBER') {
+    if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
     }
-    if (error.code === 'MISSING_BUSINESS_OWNER') {
+    if (error.code === "MISSING_BUSINESS_OWNER") {
       return res.status(400).json({ message: error.message });
     }
-    res.status(400).json({ message: 'Error creating lot', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Error creating lot", error: error.message });
   }
 });
 
 // Update lot
-router.patch('/:id', async (req, res) => {
+router.patch("/:id", async (req, res) => {
   try {
     const userId = getDataOwnerId(req.user);
     const lotQuery = isParty(req.user)
       ? getPartyAccessibleLotFilter(req.user, { _id: req.params.id })
       : getScopedFilter(req, { _id: req.params.id });
     const body = isParty(req.user)
-      ? Object.fromEntries(Object.entries(req.body).filter(([key]) => partyEditableLotFields.has(key)))
+      ? Object.fromEntries(
+          Object.entries(req.body).filter(([key]) =>
+            partyEditableLotFields.has(key),
+          ),
+        )
       : req.body;
+    // Validate update payload (at least one writable field required)
+    const { error: updateErr } = updateLotSchema.validate(body, {
+      abortEarly: false,
+      allowUnknown: true,
+    });
+    if (updateErr) {
+      return res
+        .status(400)
+        .json({
+          message: "Invalid lot update payload",
+          details: updateErr.details.map((d) => d.message),
+        });
+    }
     const existing = await GhausiaLot.findOne(lotQuery);
     if (!existing) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
 
     const payload = await normalizeLotUpdatePayload(body, userId);
@@ -440,13 +653,22 @@ router.patch('/:id', async (req, res) => {
 
     if (!isParty(req.user)) {
       const cur = normalizeStatus(existing.status);
-      const next = payload.status != null ? normalizeStatus(payload.status) : cur;
+      const next =
+        payload.status != null ? normalizeStatus(payload.status) : cur;
       const hasApprovalTs = Boolean(existing.completionApprovedAt);
-      if (cur === 'pending approval' && next === 'received back') {
+      if (cur === "pending approval" && next === "received back") {
         payload.completionApprovedAt = new Date();
-      } else if (next === 'received back' && cur !== 'received back' && !hasApprovalTs) {
+      } else if (
+        next === "received back" &&
+        cur !== "received back" &&
+        !hasApprovalTs
+      ) {
         payload.completionApprovedAt = new Date();
-      } else if (next === 'completed' && cur !== 'completed' && !hasApprovalTs) {
+      } else if (
+        next === "completed" &&
+        cur !== "completed" &&
+        !hasApprovalTs
+      ) {
         payload.completionApprovedAt = new Date();
       }
     }
@@ -455,34 +677,34 @@ router.patch('/:id', async (req, res) => {
     if (isParty(req.user) && payload.status) {
       const next = normalizeStatus(payload.status);
       const cur = normalizeStatus(existing.status);
-      if (next === 'received back' || next === 'completed') {
+      if (next === "received back" || next === "completed") {
         return res.status(403).json({
           message:
-            'You cannot mark a lot billable directly. Submit for completion from your Party Ledger.',
+            "You cannot mark a lot billable directly. Submit for completion from your Party Ledger.",
         });
       }
-      if (next === 'pending approval') {
-        if (cur === 'rejected') {
+      if (next === "pending approval") {
+        if (cur === "rejected") {
           return res.status(400).json({
             message:
-              'This lot was rejected — switch it back to In Progress before submitting again.',
+              "This lot was rejected — switch it back to In Progress before submitting again.",
           });
         }
         // Allow pending: ledger often shows In Progress while Ghausia row is still "pending" until dispatch is recorded.
-        const allowedPrev = ['pending', 'dispatched', 'in progress'];
+        const allowedPrev = ["pending", "dispatched", "in progress"];
         if (!allowedPrev.includes(cur)) {
           return res.status(400).json({
             message:
-              'You can submit for approval only when the lot is pending, dispatched, or in progress.',
+              "You can submit for approval only when the lot is pending, dispatched, or in progress.",
           });
         }
-        if (cur !== 'pending approval') {
+        if (cur !== "pending approval") {
           becamePendingApproval = true;
           payload.pendingReviewSubmittedAt = new Date();
         }
       }
-      if (next === 'dispatched' && cur === 'rejected') {
-        payload.rejectionNote = '';
+      if (next === "dispatched" && cur === "rejected") {
+        payload.rejectionNote = "";
       }
     }
 
@@ -494,13 +716,12 @@ router.patch('/:id', async (req, res) => {
       existing._id,
     );
 
-    const lot = await GhausiaLot.findOneAndUpdate(
-      lotQuery,
-      payload,
-      { new: true, runValidators: true }
-    );
+    const lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
+      new: true,
+      runValidators: true,
+    });
     if (!lot) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
     await syncPartyLedgerForLot(
       lot.toObject({ virtuals: true }),
@@ -510,38 +731,46 @@ router.patch('/:id', async (req, res) => {
     res.json(lot);
     const lotObj = lot.toObject({ virtuals: true });
     if (becamePendingApproval) {
-      emitOrgChange(req, 'lot', {
+      emitOrgChange(req, "lot", {
         lotId: String(lot._id),
-        action: 'lot_pending_review',
+        action: "lot_pending_review",
         linkPath: `/review-lots?lotId=${encodeURIComponent(String(lot._id))}`,
       });
       void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
     } else {
-      emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+      emitOrgChange(req, "lot", { lotId: String(lot._id) });
     }
   } catch (error) {
-    if (error.code === 'DUPLICATE_LOT_NUMBER') {
+    if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
     }
-    if (error.code === 'MISSING_BUSINESS_OWNER') {
+    if (error.code === "MISSING_BUSINESS_OWNER") {
       return res.status(400).json({ message: error.message });
     }
-    res.status(400).json({ message: 'Error updating lot', error: error.message });
+    res
+      .status(400)
+      .json({ message: "Error updating lot", error: error.message });
   }
 });
 
 // Delete lot
-router.delete('/:id', async (req, res) => {
+router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
-    const lot = await GhausiaLot.findOneAndDelete({ _id: req.params.id, userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId });
+    const lot = await GhausiaLot.findOneAndDelete({
+      _id: req.params.id,
+      userId: getDataOwnerId(req.user),
+      businessOwnerId: req.businessOwnerId,
+    });
     if (!lot) {
-      return res.status(404).json({ message: 'Lot not found' });
+      return res.status(404).json({ message: "Lot not found" });
     }
-    res.json({ message: 'Lot deleted successfully' });
-    emitOrgChange(req, 'lot', { lotId: String(lot._id) });
+    res.json({ message: "Lot deleted successfully" });
+    emitOrgChange(req, "lot", { lotId: String(lot._id) });
   } catch (error) {
-    res.status(500).json({ message: 'Error deleting lot', error: error.message });
+    res
+      .status(500)
+      .json({ message: "Error deleting lot", error: error.message });
   }
 });
 

@@ -1,15 +1,15 @@
-require('dotenv').config();
-const mongoose = require('mongoose');
-const fs = require('fs');
-const path = require('path');
+require("dotenv").config();
+const _mongoose = require("mongoose");
+const _fs = require("fs");
+const _path = require("path");
 
 // Import models
-const Collection = require('../models/Collection');
-const Party = require('../models/Party');
-const GhausiaLot = require('../models/GhausiaLot');
-const Payment = require('../models/Payment');
-const PartyLedger = require('../models/PartyLedger');
-const RateCalculation = require('../models/RateCalculation');
+const _Collection = require("../models/Collection");
+const _Party = require("../models/Party");
+const _GhausiaLot = require("../models/GhausiaLot");
+const _Payment = require("../models/Payment");
+const _PartyLedger = require("../models/PartyLedger");
+const _RateCalculation = require("../models/RateCalculation");
 
 // const migrateData = async () => {
 //   try {
@@ -73,7 +73,7 @@ const RateCalculation = require('../models/RateCalculation');
 //     // Migrate Ghausia Lots
 //     if (jsonData.ghausiaLots && jsonData.ghausiaLots.length > 0) {
 //       await GhausiaLot.deleteMany({});
-//       const validLots = cleanData(jsonData.ghausiaLots).filter(lot => 
+//       const validLots = cleanData(jsonData.ghausiaLots).filter(lot =>
 //         lot.lotNumber || lot.lotNo
 //       ).map(lot => ({
 //         lotNumber: lot.lotNumber || lot.lotNo || 'Unknown',
@@ -86,7 +86,7 @@ const RateCalculation = require('../models/RateCalculation');
 //         status: 'completed',
 //         notes: lot.description || lot.notes || ''
 //       }));
-      
+
 //       if (validLots.length > 0) {
 //         const ghausiaLots = await GhausiaLot.insertMany(validLots);
 //         console.log(`✅ Migrated ${ghausiaLots.length} ghausia lots`);
@@ -98,7 +98,7 @@ const RateCalculation = require('../models/RateCalculation');
 //     // Migrate Payments
 //     if (jsonData.payments && jsonData.payments.length > 0) {
 //       await Payment.deleteMany({});
-//       const validPayments = cleanData(jsonData.payments).filter(p => 
+//       const validPayments = cleanData(jsonData.payments).filter(p =>
 //         p.partyName || p.partyId
 //       ).map(p => ({
 //         partyId: p.partyId || '',
@@ -110,7 +110,7 @@ const RateCalculation = require('../models/RateCalculation');
 //         notes: p.notes || '',
 //         status: 'completed'
 //       }));
-      
+
 //       if (validPayments.length > 0) {
 //         const payments = await Payment.insertMany(validPayments);
 //         console.log(`✅ Migrated ${payments.length} payments`);
@@ -130,7 +130,7 @@ const RateCalculation = require('../models/RateCalculation');
 //         description: l.description || '',
 //         date: l.date || new Date()
 //       }));
-      
+
 //       if (validLedger.length > 0) {
 //         const ledgerEntries = await PartyLedger.insertMany(validLedger);
 //         console.log(`✅ Migrated ${ledgerEntries.length} ledger entries`);
@@ -151,7 +151,7 @@ const RateCalculation = require('../models/RateCalculation');
 //         finalRate: r.finalRate || r.baseRate,
 //         totalAmount: r.totalAmount || (r.baseRate * (r.quantity || 1))
 //       }));
-      
+
 //       if (validCalcs.length > 0) {
 //         const rateCalcs = await RateCalculation.insertMany(validCalcs);
 //         console.log(`✅ Migrated ${rateCalcs.length} rate calculations`);
