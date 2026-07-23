@@ -52,7 +52,7 @@ router.get("/:id", async (req, res) => {
     const filter = isParty(req.user)
       ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
       : { userId: getDataOwnerId(req.user), _id: req.params.id };
-    const party = await Party.findOne(filter);
+    const party = await Party.findOne(filter).lean();
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
     }
