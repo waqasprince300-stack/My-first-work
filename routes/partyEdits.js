@@ -261,7 +261,14 @@ router.get("/lot/:lotId", async (req, res) => {
     }
 
     if (!row) {
-      return res.status(404).json({ message: "Party edit not found" });
+      return res.json({
+        id: null,
+        lotId: lotIdStr,
+        receipt: "",
+        hasReceipt: false,
+        hasLotImages: false,
+        lotImagesCount: 0,
+      });
     }
     const lotImagesCount = Array.isArray(row.lotImages)
       ? row.lotImages.length
