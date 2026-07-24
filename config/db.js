@@ -183,6 +183,19 @@ const connectDB = async () => {
     }
 
     console.error("❌ MongoDB connection failed:", msg);
+    if (process.env.NODE_ENV === "development") {
+      console.warn("⚠️ Local MongoDB not found. Starting in-memory MongoDB (MongoMemoryServer)...");
+      try {
+        const { MongoMemoryServer } = require("mongodb-memory-server");
+        const mongoServer = await MongoMemoryServer.create();
+        const mongoUri = mongoServer.getUri();
+        await tryUri(mongoUri, "MongoMemoryServer (In-Memory)");
+        wireEvents();
+        return mongoose.connection;
+      } catch (memErr) {
+        console.error("❌ MongoMemoryServer failed to start:", memErr.message || memErr);
+      }
+    }
     if (dnsFailure(msg)) {
       console.error("");
       console.error(
