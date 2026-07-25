@@ -24,7 +24,7 @@ const partyEditSchema = new mongoose.Schema(
     },
     partyBillAmount: {
       type: Number,
-      default: 0,
+      default: null,
     },
     receipt: {
       type: String,
