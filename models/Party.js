@@ -62,6 +62,30 @@ const partySchema = new mongoose.Schema(
       enum: ["active", "inactive"],
       default: "active",
     },
+    showWorkspace: {
+      type: Boolean,
+      default: true,
+    },
+    workspaceAlias: {
+      type: String,
+      default: "",
+    },
+    workspaceOverrides: [
+      {
+        businessOwnerId: {
+          type: String,
+          default: "",
+        },
+        showWorkspace: {
+          type: Boolean,
+          default: true,
+        },
+        alias: {
+          type: String,
+          default: "",
+        },
+      },
+    ],
     notes: {
       type: String,
       default: "",
