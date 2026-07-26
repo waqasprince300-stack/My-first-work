@@ -168,6 +168,34 @@ const ghausiaLotSchema = new mongoose.Schema(
       default: "",
       required: false,
     },
+    suitType: {
+      type: String,
+      enum: ["2-piece", "3-piece", "dupatta-only"],
+      default: "2-piece",
+      required: false,
+    },
+    suitComponent: {
+      type: String,
+      enum: ["main", "dupatta"],
+      default: "main",
+      required: false,
+    },
+    ownerBillingChoice: {
+      type: String,
+      enum: ["separate", "combined"],
+      default: "separate",
+      required: false,
+    },
+    isRework: {
+      type: Boolean,
+      default: false,
+      required: false,
+    },
+    linkedLotId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "GhausiaLot",
+      required: false,
+    },
   },
   {
     timestamps: true,
@@ -175,13 +203,12 @@ const ghausiaLotSchema = new mongoose.Schema(
 );
 
 // Lot numbers are unique per (user × business workspace), not globally on lotNumber.
-// Legacy databases may still have `{ lotNumber: 1 }, { unique: true }` — run:
-// `npm run migrate:lot-indexes` to drop it and sync this compound index.
+// We include suitComponent and isRework to allow identical lot numbers for Dupatta and Rework cases.
 ghausiaLotSchema.index(
-  { userId: 1, businessOwnerId: 1, lotNumber: 1 },
+  { userId: 1, businessOwnerId: 1, lotNumber: 1, suitComponent: 1, isRework: 1 },
   {
     unique: true,
-    name: "userId_1_businessOwnerId_1_lotNumber_1_partial_unique",
+    name: "userId_1_businessOwnerId_1_lotNumber_1_suitComponent_1_isRework_1_unique",
     partialFilterExpression: {
       lotNumber: { $exists: true, $type: "string", $gt: "" },
     },
@@ -198,3 +225,12 @@ ghausiaLotSchema.index({
 });
 
 module.exports = mongoose.model("GhausiaLot", ghausiaLotSchema);
+
+// Auto-drop the old index so we can create 3-piece duplicate lot numbers.
+mongoose.connection.once('open', async () => {
+  try {
+    const col = mongoose.connection.collection("ghausialots");
+    await col.dropIndex("userId_1_businessOwnerId_1_lotNumber_1_partial_unique");
+    console.log("Old partial index dropped successfully.");
+  } catch (e) {}
+});

@@ -26,7 +26,7 @@ const { toDateOrNull, toDateOrNow } = require("../utils/dateHelpers");
 
 const Joi = require("joi");
 
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+const stripOwnership = ({ userId, businessOwnerId, createdAt, updatedAt, _id, id, ...data }) => data;
 const partyEditableLotFields = new Set([
   "status",
   "dispatchDate",
@@ -50,6 +50,8 @@ const ensureLotNumberUniqueInCollection = async (
   businessOwnerId,
   lotNumber,
   excludeId,
+  suitComponent = "main",
+  isRework = false
 ) => {
   const trimmed = String(lotNumber || "").trim();
   if (!trimmed) return;
@@ -70,9 +72,11 @@ const ensureLotNumberUniqueInCollection = async (
   const candidates = await GhausiaLot.find({
     userId: uid,
     $or: [{ lotNumber: regex }, { lotNo: regex }],
+    suitComponent,
+    isRework: Boolean(isRework),
     ...(exclude ? { _id: { $ne: exclude } } : {}),
   })
-    .select("_id businessOwnerId lotNumber lotNo")
+    .select("_id businessOwnerId lotNumber lotNo suitComponent isRework")
     .lean();
 
   const conflict = candidates.find((doc) =>
@@ -170,6 +174,10 @@ const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
     receivedBackDate: receivedBackDate ? receivedBackDate : null,
     status,
     notes,
+    suitType: payload.suitType || "2-piece",
+    suitComponent: payload.suitComponent || "main",
+    isRework: Boolean(payload.isRework),
+    linkedLotId: payload.linkedLotId || null,
   };
 };
 
@@ -184,7 +192,7 @@ const STATUS_VALUES = [
   "rejected",
 ];
 const createLotSchema = Joi.object({
-  lotNumber: Joi.string().trim().required(),
+  lotNumber: Joi.string().trim().allow("", null).optional(),
   designNo: Joi.string().allow("", null),
   description: Joi.string().allow("", null),
   itemType: Joi.string().allow("", null),
@@ -201,6 +209,12 @@ const createLotSchema = Joi.object({
   billAmount: Joi.number().min(0).optional(),
   partyId: Joi.string().allow("", null).optional(),
   partyName: Joi.string().allow("", null).optional(),
+  suitType: Joi.string().valid("2-piece", "3-piece", "dupatta-only").optional(),
+  suitComponent: Joi.string().valid("main", "dupatta").optional(),
+  isRework: Joi.boolean().optional(),
+  dupattaDetails: Joi.object().optional(),
+  ownerBillingChoice: Joi.string().optional(),
+  linkedLotId: Joi.string().allow("", null).optional(),
 });
 
 const updateLotSchema = Joi.object({
@@ -221,6 +235,12 @@ const updateLotSchema = Joi.object({
   billAmount: Joi.number().min(0).optional(),
   partyId: Joi.string().allow("", null).optional(),
   partyName: Joi.string().allow("", null).optional(),
+  suitType: Joi.string().valid("2-piece", "3-piece", "dupatta-only").optional(),
+  suitComponent: Joi.string().valid("main", "dupatta").optional(),
+  isRework: Joi.boolean().optional(),
+  dupattaDetails: Joi.object().optional(),
+  ownerBillingChoice: Joi.string().optional(),
+  linkedLotId: Joi.string().allow("", null).optional(),
 }).min(1);
 
 const normalizeLotUpdatePayload = async (payload, userId) => {
@@ -292,6 +312,11 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
     normalized.rejectionNote = String(payload.rejectionNote || "").trim();
   }
 
+  if (payload.suitType !== undefined) normalized.suitType = payload.suitType;
+  if (payload.suitComponent !== undefined) normalized.suitComponent = payload.suitComponent;
+  if (payload.isRework !== undefined) normalized.isRework = Boolean(payload.isRework);
+  if (payload.linkedLotId !== undefined) normalized.linkedLotId = payload.linkedLotId;
+
   return normalized;
 };
 
@@ -306,7 +331,23 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     "rejected",
   ];
   const ls = normalizeStatus(lot.status);
-  if (!synced.includes(ls)) return;
+  
+  const PartyEdit = require("../models/PartyEdit");
+  
+  if (!synced.includes(ls)) {
+    // If status is changed to something like 'pending' that shouldn't be in the ledger,
+    // remove the ledger entry and any party edits to keep things clean.
+    await PartyLedger.deleteOne({
+      userId,
+      businessOwnerId,
+      lotId: String(lot.id || lot._id || lot.lotNumber),
+    });
+    await PartyEdit.updateOne(
+      { userId, businessOwnerId, lotId: String(lot.id || lot._id || lot.lotNumber) },
+      { $set: { overrideStatus: "" } }
+    );
+    return;
+  }
 
   const entryData = {
     userId,
@@ -329,19 +370,32 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     notes: lot.notes || "",
   };
 
+
   const existing = await PartyLedger.findOne({
     userId,
     businessOwnerId,
-    $or: [{ lotId: entryData.lotId }, { lotNumber: entryData.lotNumber }],
+    lotId: entryData.lotId,
   });
+  
   if (existing) {
     Object.assign(existing, entryData);
     await existing.save();
+    await PartyEdit.updateOne(
+      { userId, businessOwnerId, lotId: String(entryData.lotId) },
+      { $set: { overrideStatus: "" } }
+    );
     return existing;
   }
 
   const newEntry = new PartyLedger(entryData);
   await newEntry.save();
+  
+  // Also clear any overrideStatus in PartyEdit to ensure the main lot status takes precedence
+  await PartyEdit.updateOne(
+    { userId, businessOwnerId, lotId: String(entryData.lotId) },
+    { $set: { overrideStatus: "" } }
+  );
+  
   return newEntry;
 };
 
@@ -587,22 +641,105 @@ router.post("/", async (req, res) => {
           details: createErr.details.map((d) => d.message),
         });
     }
+
+    const { dupattaDetails, ownerBillingChoice, ...mainBody } = req.body;
+    
+    // Normalize main lot
     const payload = await normalizeLotPayload(
-      stripOwnership(req.body),
+      stripOwnership(mainBody),
       userId,
       req.businessOwnerId,
     );
+
+    if (payload.suitType === "dupatta-only") {
+      payload.suitComponent = "dupatta";
+      const baseLotNum = payload.lotNumber || "";
+      const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
+      payload.lotNumber = formattedLotNum;
+      payload.lotNo = formattedLotNum;
+    }
+    
+    // Check uniqueness for main lot
     await ensureLotNumberUniqueInCollection(
       userId,
       req.businessOwnerId,
       canonicalLotNumberFromDoc(payload),
+      null,
+      payload.suitComponent,
+      payload.isRework
     );
 
-    const lot = new GhausiaLot(payload);
-    const savedLot = await lot.save();
-    await syncPartyLedgerForLot(savedLot, userId, req.businessOwnerId);
-    res.status(201).json(savedLot);
-    emitOrgChange(req, "lot", { lotId: String(savedLot._id) });
+    let savedMainLot;
+    let savedDupattaLot;
+
+    // Handle 3-piece logic
+    if (payload.suitType === "3-piece" && dupattaDetails) {
+      // Create Main Lot
+      const mainLotData = { ...payload, suitComponent: "main" };
+      let dupattaLotData = { ...payload, suitComponent: "dupatta" };
+      const baseLotNum = dupattaLotData.lotNumber || "";
+      const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
+      dupattaLotData.lotNumber = formattedLotNum;
+      dupattaLotData.lotNo = formattedLotNum;
+
+      // Apply Dupatta Specific Details
+      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
+      if (dupattaLotData.partyId) {
+        dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
+      } else {
+        dupattaLotData.partyName = "Unknown";
+      }
+      if (dupattaDetails.rate != null) dupattaLotData.rate = Number(dupattaDetails.rate);
+      if (dupattaDetails.fabric) {
+        dupattaLotData.fabric = dupattaDetails.fabric;
+        dupattaLotData.itemType = dupattaDetails.fabric;
+      }
+      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
+        dupattaLotData.quantity = Number(dupattaDetails.quantity);
+        dupattaLotData.pieces = Number(dupattaDetails.quantity);
+      }
+
+      // Handle Combined vs Separate Billing
+      if (ownerBillingChoice === "combined") {
+        // Main gets the combined bill
+        mainLotData.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
+        mainLotData.totalAmount = mainLotData.billAmount;
+        
+        // Dupatta gets 0 owner bill
+        dupattaLotData.billAmount = 0;
+        dupattaLotData.totalAmount = 0;
+      } else {
+        // Separate bills
+        dupattaLotData.billAmount = Number(dupattaDetails.billAmount || 0);
+        dupattaLotData.totalAmount = dupattaLotData.billAmount;
+      }
+
+      // Create them
+      const mainLot = new GhausiaLot(mainLotData);
+      const dupattaLot = new GhausiaLot(dupattaLotData);
+      
+      mainLot.linkedLotId = dupattaLot._id;
+      dupattaLot.linkedLotId = mainLot._id;
+
+      [savedMainLot, savedDupattaLot] = await Promise.all([
+        mainLot.save(),
+        dupattaLot.save()
+      ]);
+
+      await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
+      await syncPartyLedgerForLot(savedDupattaLot, userId, req.businessOwnerId);
+      
+      emitOrgChange(req, "lot", { lotId: String(savedDupattaLot._id) });
+
+    } else {
+      // 2-piece or dupatta-only
+      const lot = new GhausiaLot(payload);
+      savedMainLot = await lot.save();
+      await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
+    }
+
+    res.status(201).json(savedMainLot);
+    emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
@@ -617,6 +754,7 @@ router.post("/", async (req, res) => {
 });
 
 // Update lot
+
 router.patch("/:id", async (req, res) => {
   try {
     const userId = getDataOwnerId(req.user);
@@ -708,12 +846,211 @@ router.patch("/:id", async (req, res) => {
       }
     }
 
+    let newDupattaLot = null;
+    let dupattaToDelete = null;
+
+    const isMainComponent = !existing.suitComponent || existing.suitComponent === "main";
+
+    if ((existing.suitType !== "3-piece" || !existing.linkedLotId) && payload.suitType === "3-piece" && body.dupattaDetails && isMainComponent) {
+      const dupattaDetails = body.dupattaDetails;
+      payload.suitComponent = "main";
+      
+      let dupattaLotData = { 
+        ...payload, 
+        suitComponent: "dupatta", 
+        suitType: "3-piece", 
+        userId, 
+        businessOwnerId: existing.businessOwnerId,
+        status: "pending",
+        dispatchDate: null,
+        receivedBackDate: null,
+        completionApprovedAt: null,
+        rejectionNote: ""
+      };
+      
+      const baseLotNum = dupattaLotData.lotNumber || "";
+      const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
+      dupattaLotData.lotNumber = formattedLotNum;
+      dupattaLotData.lotNo = formattedLotNum;
+      
+      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
+      if (dupattaLotData.partyId) {
+        dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
+      } else {
+        dupattaLotData.partyName = "Unknown";
+      }
+      if (dupattaDetails.rate != null) dupattaLotData.rate = Number(dupattaDetails.rate);
+      if (dupattaDetails.fabric) {
+        dupattaLotData.fabric = dupattaDetails.fabric;
+        dupattaLotData.itemType = dupattaDetails.fabric;
+      }
+      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
+        dupattaLotData.quantity = Number(dupattaDetails.quantity);
+        dupattaLotData.pieces = Number(dupattaDetails.quantity);
+      }
+      
+      if (payload.ownerBillingChoice === "combined") {
+        payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
+        payload.totalAmount = payload.billAmount;
+        dupattaLotData.billAmount = 0;
+        dupattaLotData.totalAmount = 0;
+      } else {
+        dupattaLotData.billAmount = Number(dupattaDetails.billAmount || 0);
+        dupattaLotData.totalAmount = dupattaLotData.billAmount;
+      }
+      
+      const checkLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
+      const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
+      
+      const checkBaseLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
+      const finalCheckLotNumber = (checkBaseLotNumber || "").endsWith("-D") ? checkBaseLotNumber : checkBaseLotNumber + "-D";
+
+      let existingDupatta = await GhausiaLot.findOne({
+        userId,
+        businessOwnerId: existing.businessOwnerId,
+        $or: [{ lotNumber: new RegExp(`^${escapeRegexString(finalCheckLotNumber)}$`, "i") }, { lotNo: new RegExp(`^${escapeRegexString(finalCheckLotNumber)}$`, "i") }],
+        suitComponent: "dupatta",
+        isRework: Boolean(checkIsRework)
+      });
+
+      if (existingDupatta) {
+         payload.linkedLotId = existingDupatta._id;
+         existingDupatta.linkedLotId = existing._id;
+         if (dupattaLotData.partyId !== undefined) existingDupatta.partyId = dupattaLotData.partyId;
+         if (dupattaLotData.partyName !== undefined) existingDupatta.partyName = dupattaLotData.partyName;
+         if (dupattaLotData.rate !== undefined) existingDupatta.rate = dupattaLotData.rate;
+         if (dupattaLotData.fabric !== undefined) {
+           existingDupatta.fabric = dupattaLotData.fabric;
+           existingDupatta.itemType = dupattaLotData.itemType;
+         }
+         if (dupattaLotData.quantity !== undefined) {
+           existingDupatta.quantity = dupattaLotData.quantity;
+           existingDupatta.pieces = dupattaLotData.pieces;
+         }
+         if (dupattaLotData.billAmount !== undefined) {
+           existingDupatta.billAmount = dupattaLotData.billAmount;
+           existingDupatta.totalAmount = dupattaLotData.totalAmount;
+         }
+         await existingDupatta.save();
+         await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, existing.businessOwnerId);
+         emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
+      } else {
+         await ensureLotNumberUniqueInCollection(
+           userId,
+           existing.businessOwnerId,
+           checkLotNumber,
+           null,
+           "dupatta",
+           checkIsRework
+         );
+         
+         newDupattaLot = new GhausiaLot(dupattaLotData);
+         payload.linkedLotId = newDupattaLot._id;
+         newDupattaLot.linkedLotId = existing._id;
+      }
+    } else if (existing.suitType === "3-piece" && payload.suitType === "3-piece" && body.dupattaDetails && existing.linkedLotId && isMainComponent) {
+      const dupattaDetails = body.dupattaDetails;
+      let dupattaUpdateData = {};
+      
+      dupattaUpdateData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
+      if (dupattaUpdateData.partyId) {
+        dupattaUpdateData.partyName = await resolvePartyName(dupattaUpdateData.partyId, dupattaDetails.partyName, userId);
+      } else {
+        dupattaUpdateData.partyName = "Unknown";
+      }
+      if (dupattaDetails.rate != null) dupattaUpdateData.rate = Number(dupattaDetails.rate);
+      if (dupattaDetails.fabric) {
+        dupattaUpdateData.fabric = dupattaDetails.fabric;
+        dupattaUpdateData.itemType = dupattaDetails.fabric;
+      }
+      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
+        dupattaUpdateData.quantity = Number(dupattaDetails.quantity);
+        dupattaUpdateData.pieces = Number(dupattaDetails.quantity);
+      }
+      
+      if (payload.ownerBillingChoice === "combined") {
+        payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
+        payload.totalAmount = payload.billAmount;
+        dupattaUpdateData.billAmount = 0;
+        dupattaUpdateData.totalAmount = 0;
+      } else {
+        dupattaUpdateData.billAmount = Number(dupattaDetails.billAmount || 0);
+        dupattaUpdateData.totalAmount = dupattaUpdateData.billAmount;
+      }
+
+      if (payload.lotNumber) {
+         const baseLotNum = payload.lotNumber;
+         const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
+         dupattaUpdateData.lotNumber = formattedLotNum;
+         dupattaUpdateData.lotNo = formattedLotNum;
+      }
+      
+      if (payload.isRework !== undefined) {
+         dupattaUpdateData.isRework = payload.isRework;
+      }
+
+      if (payload.designNo !== undefined) {
+         dupattaUpdateData.designNo = payload.designNo;
+      }
+      
+      if (payload.description !== undefined) {
+         dupattaUpdateData.description = payload.description;
+      }
+      
+      if (payload.colors !== undefined) {
+         dupattaUpdateData.colors = payload.colors;
+      }
+      
+      if (payload.allotDate !== undefined) {
+         dupattaUpdateData.allotDate = payload.allotDate;
+         dupattaUpdateData.receivedDate = payload.allotDate;
+      }
+      
+      if (payload.lotNumber !== undefined || payload.isRework !== undefined) {
+         const rawLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
+         const checkLotNumber = (rawLotNumber || "").endsWith("-D") ? rawLotNumber : rawLotNumber + "-D";
+         const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
+         
+         await ensureLotNumberUniqueInCollection(
+           userId,
+           existing.businessOwnerId,
+           checkLotNumber,
+           existing.linkedLotId,
+           "dupatta",
+           checkIsRework
+         );
+      }
+      
+      const updatedDupatta = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, dupattaUpdateData, { new: true });
+      if (updatedDupatta) {
+         await syncPartyLedgerForLot(updatedDupatta.toObject({ virtuals: true }), userId, existing.businessOwnerId);
+         emitOrgChange(req, "lot", { lotId: String(updatedDupatta._id) });
+      }
+    } else if (existing.suitType === "3-piece" && payload.suitType !== undefined && payload.suitType !== "3-piece" && isMainComponent) {
+      payload.suitComponent = "main";
+      payload.linkedLotId = null;
+      payload.ownerBillingChoice = "separate";
+      if (existing.linkedLotId && String(existing.linkedLotId) !== String(existing._id)) {
+        dupattaToDelete = existing.linkedLotId;
+      }
+    } else if (payload.syncMainLotPieces && existing.suitComponent === "dupatta" && existing.linkedLotId && payload.pieces !== undefined) {
+      const updatedMain = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, {
+        pieces: payload.pieces,
+        quantity: payload.quantity
+      }, { new: true });
+      if (updatedMain) {
+        emitOrgChange(req, "lot", { lotId: String(updatedMain._id) });
+      }
+    }
+
     const merged = { ...existing.toObject(), ...payload };
     await ensureLotNumberUniqueInCollection(
       userId,
       existing.businessOwnerId,
       canonicalLotNumberFromDoc(merged),
       existing._id,
+      merged.suitComponent,
+      merged.isRework
     );
 
     const lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
@@ -728,8 +1065,19 @@ router.patch("/:id", async (req, res) => {
       userId,
       lot.businessOwnerId,
     );
-    res.json(lot);
     const lotObj = lot.toObject({ virtuals: true });
+    
+    if (newDupattaLot) {
+      await newDupattaLot.save();
+      await syncPartyLedgerForLot(newDupattaLot, userId, existing.businessOwnerId);
+      emitOrgChange(req, "lot", { lotId: String(newDupattaLot._id) });
+    }
+    if (dupattaToDelete && String(dupattaToDelete) !== String(existing._id)) {
+      await GhausiaLot.findByIdAndDelete(dupattaToDelete);
+      await PartyLedger.deleteMany({ lotId: String(dupattaToDelete) });
+      emitOrgChange(req, "lot", { lotId: String(dupattaToDelete) });
+    }
+
     if (becamePendingApproval) {
       emitOrgChange(req, "lot", {
         lotId: String(lot._id),
@@ -740,6 +1088,7 @@ router.patch("/:id", async (req, res) => {
     } else {
       emitOrgChange(req, "lot", { lotId: String(lot._id) });
     }
+    res.json(lot);
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
@@ -765,6 +1114,27 @@ router.delete("/:id", async (req, res) => {
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
     }
+    
+    // Delete linked lot if it exists
+    if (lot.linkedLotId) {
+      if (lot.suitComponent === "main") {
+        await GhausiaLot.findByIdAndDelete(lot.linkedLotId);
+        await PartyLedger.deleteMany({ lotId: String(lot.linkedLotId) });
+        emitOrgChange(req, "lot", { lotId: String(lot.linkedLotId) });
+      } else if (lot.suitComponent === "dupatta") {
+        const mainLot = await GhausiaLot.findByIdAndUpdate(lot.linkedLotId, {
+          suitType: "2-piece",
+          linkedLotId: null,
+          ownerBillingChoice: "separate"
+        }, { new: true });
+        if (mainLot) {
+          emitOrgChange(req, "lot", { lotId: String(mainLot._id) });
+        }
+      }
+    }
+    
+    await PartyLedger.deleteMany({ lotId: String(lot._id) });
+    
     res.json({ message: "Lot deleted successfully" });
     emitOrgChange(req, "lot", { lotId: String(lot._id) });
   } catch (error) {
