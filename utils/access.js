@@ -31,7 +31,7 @@ const getPartyPaymentOrConditions = (user) => {
   const or = [];
   if (pid) or.push({ partyId: pid });
   if (pname)
-    or.push({ party: new RegExp(`^${escapeRegexString(pname)}$`, "i") });
+    or.push({ party: new RegExp(`^\\s*${escapeRegexString(pname)}\\s*$`, "i") });
   if (!or.length) return [{ partyId: "__impossible_party__" }];
   return or;
 };
@@ -44,7 +44,7 @@ const getPartyAllBusinessLotsFilter = (user) => {
   const or = [];
   if (pid) or.push({ partyId: pid });
   if (pname)
-    or.push({ partyName: new RegExp(`^${escapeRegexString(pname)}$`, "i") });
+    or.push({ partyName: new RegExp(`^\\s*${escapeRegexString(pname)}\\s*$`, "i") });
   if (!or.length) return { userId, _id: { $in: [] } };
   return { userId, $or: or };
 };
@@ -102,61 +102,69 @@ const ensureDefaultBusinessOwner = async (user) => {
   if (legacyMigrationDone.has(String(userId))) {
     return owner;
   }
-
-  const missingOwnerFilter = {
-    userId,
-    $or: [{ businessOwnerId: { $exists: false } }, { businessOwnerId: null }],
-  };
-  const ownerUpdate = { $set: { businessOwnerId: owner._id } };
-  const models = [
-    require("../models/Collection"),
-    require("../models/Party"),
-    require("../models/GhausiaLot"),
-    require("../models/Payment"),
-    require("../models/PartyEdit"),
-    require("../models/PartyLedger"),
-    require("../models/RateCalculation"),
-    require("../models/SavedDesign"),
-  ];
-
-  const migrationChecks = await Promise.all(
-    models.map((Model) => Model.exists(missingOwnerFilter)),
-  );
-  if (migrationChecks.some(Boolean)) {
-    await Promise.all(
-      models.map((Model) => Model.updateMany(missingOwnerFilter, ownerUpdate)),
-    );
-  }
-
-  // Legacy rows may have businessOwnerId stored as "" — bypass Mongoose schema casting for this match
-  const uid =
-    userId instanceof mongoose.Types.ObjectId
-      ? userId
-      : new mongoose.Types.ObjectId(userId);
-  const ownerId =
-    owner._id instanceof mongoose.Types.ObjectId
-      ? owner._id
-      : new mongoose.Types.ObjectId(owner._id);
-  const legacyChecks = await Promise.all(
-    models.map((Model) =>
-      Model.collection.findOne(
-        { userId: uid, businessOwnerId: "" },
-        { projection: { _id: 1 } },
-      ),
-    ),
-  );
-  if (legacyChecks.some(Boolean)) {
-    await Promise.all(
-      models.map((Model) =>
-        Model.collection.updateMany(
-          { userId: uid, businessOwnerId: "" },
-          { $set: { businessOwnerId: ownerId } },
-        ),
-      ),
-    );
-  }
-
+  
   legacyMigrationDone.add(String(userId));
+
+  // Run the legacy migration checks in the background so it doesn't block the request.
+  (async () => {
+    try {
+      const missingOwnerFilter = {
+        userId,
+        $or: [{ businessOwnerId: { $exists: false } }, { businessOwnerId: null }],
+      };
+      const ownerUpdate = { $set: { businessOwnerId: owner._id } };
+      const models = [
+        require("../models/Collection"),
+        require("../models/Party"),
+        require("../models/GhausiaLot"),
+        require("../models/Payment"),
+        require("../models/PartyEdit"),
+        require("../models/PartyLedger"),
+        require("../models/RateCalculation"),
+        require("../models/SavedDesign"),
+      ];
+
+      const migrationChecks = await Promise.all(
+        models.map((Model) => Model.exists(missingOwnerFilter)),
+      );
+      if (migrationChecks.some(Boolean)) {
+        await Promise.all(
+          models.map((Model) => Model.updateMany(missingOwnerFilter, ownerUpdate)),
+        );
+      }
+
+      // Legacy rows may have businessOwnerId stored as "" — bypass Mongoose schema casting for this match
+      const uid =
+        userId instanceof mongoose.Types.ObjectId
+          ? userId
+          : new mongoose.Types.ObjectId(userId);
+      const ownerId =
+        owner._id instanceof mongoose.Types.ObjectId
+          ? owner._id
+          : new mongoose.Types.ObjectId(owner._id);
+      const legacyChecks = await Promise.all(
+        models.map((Model) =>
+          Model.collection.findOne(
+            { userId: uid, businessOwnerId: "" },
+            { projection: { _id: 1 } },
+          ),
+        ),
+      );
+      if (legacyChecks.some(Boolean)) {
+        await Promise.all(
+          models.map((Model) =>
+            Model.collection.updateMany(
+              { userId: uid, businessOwnerId: "" },
+              { $set: { businessOwnerId: ownerId } },
+            ),
+          ),
+        );
+      }
+    } catch (err) {
+      console.error("Background legacy migration check failed:", err);
+    }
+  })();
+
   return owner;
 };
 

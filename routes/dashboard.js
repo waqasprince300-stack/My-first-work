@@ -57,7 +57,16 @@ router.get("/summary", async (req, res) => {
     const paymentFilter = paymentFilterForSummary(req);
     const userId = getDataOwnerId(req.user);
 
-    const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds] =
+    const partyCountPromise = isParty(req.user)
+      ? Promise.resolve(1)
+      : Party.countDocuments(
+          String(req.query.scope || "").toLowerCase() === "all" &&
+            isTenantAdmin(req.user)
+            ? { userId }
+            : getScopedFilter(req),
+        );
+
+    const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds, totalParties] =
       await Promise.all([
         GhausiaLot.aggregate([
           { $match: lotFilter },
@@ -107,6 +116,7 @@ router.get("/summary", async (req, res) => {
           ...lotFilter,
           partyId: { $exists: true, $nin: ["", null] },
         }),
+        partyCountPromise,
       ]);
 
     const byStatus = {};
@@ -186,14 +196,7 @@ router.get("/summary", async (req, res) => {
       },
       parties: {
         activeWithLots: activePartyIds.filter(Boolean).length,
-        totalParties: isParty(req.user)
-          ? 1
-          : await Party.countDocuments(
-              String(req.query.scope || "").toLowerCase() === "all" &&
-                isTenantAdmin(req.user)
-                ? { userId }
-                : getScopedFilter(req),
-            ),
+        totalParties,
       },
     });
   } catch (error) {

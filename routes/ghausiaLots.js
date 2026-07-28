@@ -738,7 +738,11 @@ router.post("/", async (req, res) => {
       await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
     }
 
-    res.status(201).json(savedMainLot);
+    if (savedDupattaLot) {
+      res.status(201).json([savedMainLot, savedDupattaLot]);
+    } else {
+      res.status(201).json(savedMainLot);
+    }
     emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {

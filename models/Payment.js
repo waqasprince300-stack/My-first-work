@@ -37,6 +37,11 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    dateObj: {
+      type: Date,
+      required: false,
+      index: true,
+    },
     note: {
       type: String,
       default: "",
@@ -60,6 +65,35 @@ const paymentSchema = new mongoose.Schema(
     timestamps: true,
   },
 );
+
+function syncDateObj(doc) {
+  if (doc && typeof doc.date === "string" && doc.date.trim()) {
+    const parsed = new Date(doc.date);
+    if (!Number.isNaN(parsed.getTime())) {
+      doc.dateObj = parsed;
+    }
+  }
+}
+
+paymentSchema.pre("save", function (next) {
+  syncDateObj(this);
+  next();
+});
+
+paymentSchema.pre("findOneAndUpdate", function (next) {
+  const update = this.getUpdate();
+  if (update && (update.date || update.$set?.date)) {
+    const newDate = update.date || update.$set.date;
+    if (typeof newDate === "string" && newDate.trim()) {
+      const parsed = new Date(newDate);
+      if (!Number.isNaN(parsed.getTime())) {
+        if (!update.$set) update.$set = {};
+        update.$set.dateObj = parsed;
+      }
+    }
+  }
+  next();
+});
 
 paymentSchema.index({ userId: 1, businessOwnerId: 1, createdAt: -1 });
 paymentSchema.index({ userId: 1, businessOwnerId: 1, partyId: 1 });

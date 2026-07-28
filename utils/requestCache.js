@@ -32,6 +32,16 @@ const invalidateCached = (name, key) => {
   getCache(name).delete(String(key));
 };
 
+// Sweep expired entries every 5 minutes to prevent unbounded memory growth.
+setInterval(() => {
+  const now = Date.now();
+  for (const [, store] of caches) {
+    for (const [key, entry] of store) {
+      if (now > entry.expiresAt) store.delete(key);
+    }
+  }
+}, 5 * 60 * 1000).unref();
+
 module.exports = {
   getCached,
   setCached,

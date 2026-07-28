@@ -207,6 +207,7 @@ function partyBusinessOwnersFromLots(lotArrays, ownerNameMap) {
   }
   return [...seen.values()];
 }
+const { getCached, setCached } = require("../utils/requestCache");
 
 router.get("/", async (req, res) => {
   try {
@@ -216,6 +217,19 @@ router.get("/", async (req, res) => {
     const minimal =
       String(req.query.minimal || "").toLowerCase() === "1" ||
       req.query.minimal === "true";
+    
+    // Cache key specific to user and payload shape
+    const cacheKey = `bootstrap:${req.user._id}:${minimal}:${includeReceipts}:${req.query.scope || ""}:${req.query.partyScope || ""}:${req.businessOwnerId || ""}`;
+    const cached = getCached("bootstrap", cacheKey);
+    if (cached) return res.json(cached);
+
+    // Intercept res.json to cache the heavy response for 3 seconds
+    const originalJson = res.json;
+    res.json = function (body) {
+      setCached("bootstrap", cacheKey, body, 3000);
+      return originalJson.call(this, body);
+    };
+
     const receiptSelect = includeReceipts ? "" : "-receipt -lotImages";
 
     if (isTenantAdmin(req.user)) {

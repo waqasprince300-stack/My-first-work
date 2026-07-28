@@ -21,8 +21,15 @@ const stripOwnership = ({ userId: _userId, ...data }) => data;
 /** Keep hasReceipt in sync with the stored slip so list/bootstrap can flag rows without the blob. */
 const withReceiptFlag = (data) => {
   if (Object.prototype.hasOwnProperty.call(data, "receipt")) {
-    data.hasReceipt =
-      typeof data.receipt === "string" && data.receipt.trim() !== "";
+    const isString = typeof data.receipt === "string";
+    const receiptStr = isString ? data.receipt.trim() : "";
+    data.hasReceipt = receiptStr !== "";
+    
+    if (data.hasReceipt) {
+      if (!receiptStr.startsWith("data:image/") && !receiptStr.startsWith("data:application/pdf")) {
+        throw new Error("Invalid receipt format. Must be an image or PDF data URI.");
+      }
+    }
   }
   return data;
 };
@@ -32,7 +39,7 @@ const withPartyId = async (payload, userId) => {
   if (
     !data.partyId &&
     data.party &&
-    String(data.party).toLowerCase() !== "owner"
+    String(data.party).trim().toLowerCase() !== "owner"
   ) {
     const party = await Party.findOne({ userId, name: data.party });
     if (party) data.partyId = String(party._id);
@@ -81,9 +88,9 @@ router.get("/", async (req, res) => {
       .trim()
       .toLowerCase();
     if (partyKind === "owner") {
-      filter.party = /^owner$/i;
+      filter.party = /^\s*owner\s*$/i;
     } else if (partyKind === "nonowner") {
-      filter.party = { $not: /^owner$/i };
+      filter.party = { $not: /^\s*owner\s*$/i };
     }
 
     const pagination = parsePaginationQuery(req);

@@ -138,6 +138,7 @@ const ghausiaLotSchema = new mongoose.Schema(
     },
     status: {
       type: String,
+      lowercase: true,
       enum: [
         "pending",
         "dispatched",
@@ -146,13 +147,6 @@ const ghausiaLotSchema = new mongoose.Schema(
         "in progress",
         "pending approval",
         "rejected",
-        "Pending",
-        "Dispatched",
-        "Received Back",
-        "Completed",
-        "In Progress",
-        "Pending Approval",
-        "Rejected",
         "processing",
       ],
       default: "pending",

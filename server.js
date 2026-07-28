@@ -41,6 +41,11 @@ const notificationsRouter = require("./routes/notifications");
 
 const app = express();
 const server = http.createServer(app);
+const helmet = require("helmet");
+const morgan = require("morgan");
+
+app.use(helmet());
+app.use(morgan("dev"));
 
 // ✅ Allowed origins (FIXED)
 const getAllowedOrigins = () => {
@@ -93,8 +98,9 @@ app.use(
       }
 
       if (process.env.NODE_ENV !== "production") {
-        console.warn("CORS allow (dev):", origin);
-        return callback(null, true);
+        if (/^https?:\/\/localhost:\d+$/.test(origin)) {
+          return callback(null, true);
+        }
       }
 
       console.warn("Blocked by CORS:", origin);
@@ -163,6 +169,15 @@ io.on("connection", (socket) => {
 // ✅ Make io accessible in routes
 app.use((req, res, next) => {
   req.io = io;
+  next();
+});
+
+// ✅ Global Route Parameter Validation
+const mongoose = require("mongoose");
+app.param("id", (req, res, next, id) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "Invalid ID format" });
+  }
   next();
 });
 
@@ -274,13 +289,13 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "Server is running" });
 });
 
+// ✅ Error handler (must be registered before 404 so thrown errors get proper responses)
+app.use(errorHandler);
+
 // ✅ 404 handler
 app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
 });
-
-// ✅ Error handler
-app.use(errorHandler);
 
 // cPanel / Namecheap: Phusion Passenger serves module.exports — do not require PORT in production.
 const isPassenger =
@@ -338,13 +353,22 @@ const startServer = async () => {
 // Required for cPanel / Phusion Passenger.
 module.exports = app;
 
-startServer().catch(() => {
+startServer().catch((err) => {
+  console.error("❌ Server startup failed:", err);
   process.exit(1);
 });
 
 // ✅ Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM signal received: closing HTTP server");
+  server.close(() => {
+    console.log("HTTP server closed");
+    process.exit(0);
+  });
+});
+
+process.on("SIGINT", () => {
+  console.log("SIGINT received: closing HTTP server");
   server.close(() => {
     console.log("HTTP server closed");
     process.exit(0);
