@@ -114,12 +114,12 @@ app.use(
 // ✅ Handle preflight requests
 app.options("*", cors());
 
-/** Party ledger receipts are stored as base64 in JSON; default 100kb limit causes HTTP 413. */
-app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "3mb" }));
+/** Party ledger receipts and Personal Khata are stored as base64 in JSON; default 100kb limit causes HTTP 413. */
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || "50mb" }));
 app.use(
   express.urlencoded({
     extended: true,
-    limit: process.env.JSON_BODY_LIMIT || "3mb",
+    limit: process.env.JSON_BODY_LIMIT || "50mb",
   }),
 );
 

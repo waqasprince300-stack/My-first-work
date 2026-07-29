@@ -79,6 +79,7 @@ router.get("/", authenticate, requireApproved, async (req, res) => {
 router.put("/", authenticate, requireApproved, async (req, res) => {
   try {
     const payload = sanitizeKhataPayload(req.body);
+    console.log(`[Personal Khata] Saving for user ${req.user._id} | Businesses: ${payload.businesses.length} | Contacts: ${payload.contacts.length} | Entries: ${payload.entries.length}`);
 
     const doc = await PersonalKhata.findOneAndUpdate(
       { userId: req.user._id },
