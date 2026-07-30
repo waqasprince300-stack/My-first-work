@@ -32,6 +32,12 @@ const invalidateCached = (name, key) => {
   getCache(name).delete(String(key));
 };
 
+const clearCache = (name) => {
+  if (caches.has(name)) {
+    caches.get(name).clear();
+  }
+};
+
 // Sweep expired entries every 5 minutes to prevent unbounded memory growth.
 setInterval(() => {
   const now = Date.now();
@@ -46,4 +52,5 @@ module.exports = {
   getCached,
   setCached,
   invalidateCached,
+  clearCache,
 };
