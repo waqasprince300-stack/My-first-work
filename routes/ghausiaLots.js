@@ -106,6 +106,7 @@ const normalizeStatus = (status) => {
       "in progress",
       "pending approval",
       "rejected",
+      "processing",
     ].includes(normalized)
   ) {
     return normalized;
@@ -284,13 +285,13 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
   }
 
   if (payload.billAmount != null) {
-    normalized.billAmount = Number(payload.billAmount);
+    normalized.billAmount = Math.max(0, Number(payload.billAmount));
     if (payload.totalAmount == null)
-      normalized.totalAmount = Number(payload.billAmount);
+      normalized.totalAmount = Math.max(0, Number(payload.billAmount));
   }
 
   if (payload.totalAmount != null) {
-    normalized.totalAmount = Number(payload.totalAmount);
+    normalized.totalAmount = Math.max(0, Number(payload.totalAmount));
   }
 
   if (payload.allotDate !== undefined) {
@@ -558,6 +559,7 @@ router.post("/:id/reject-completion", async (req, res) => {
 
     lot.status = "rejected";
     lot.rejectionNote = note;
+    lot.rejectedDate = new Date();
     await lot.save();
 
     const lotIdStr = String(lot._id);
@@ -942,7 +944,7 @@ router.patch("/:id", async (req, res) => {
          await ensureLotNumberUniqueInCollection(
            userId,
            existing.businessOwnerId,
-           checkLotNumber,
+           finalCheckLotNumber,
            null,
            "dupatta",
            checkIsRework
@@ -1137,7 +1139,10 @@ router.delete("/:id", async (req, res) => {
       }
     }
     
-    await PartyLedger.deleteMany({ lotId: String(lot._id) });
+    await Promise.all([
+      PartyLedger.deleteMany({ lotId: String(lot._id) }),
+      PartyEdit.deleteMany({ lotId: String(lot._id), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }),
+    ]);
     
     res.json({ message: "Lot deleted successfully" });
     emitOrgChange(req, "lot", { lotId: String(lot._id) });

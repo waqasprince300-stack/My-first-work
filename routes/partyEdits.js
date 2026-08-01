@@ -409,7 +409,7 @@ router.put("/lot/:lotId", async (req, res) => {
     }
 
     const data = {
-      ...stripOwnership(req.body),
+      ...(isParty(req.user) ? pickPartyEditPatch(req.body) : stripOwnership(req.body)),
       lotId,
       userId,
       businessOwnerId,

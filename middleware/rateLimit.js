@@ -20,7 +20,18 @@ const otpLimiter = rateLimit({
   },
 });
 
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.API_RATE_LIMIT_MAX) || 500,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Too many requests. Please wait and try again.",
+  },
+});
+
 module.exports = {
   authLimiter,
   otpLimiter,
+  apiLimiter,
 };

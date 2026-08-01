@@ -183,6 +183,7 @@ router.patch(
       user.rejectedAt = null;
       user.disabledAt = null;
       await user.save({ validateBeforeSave: false });
+      invalidateAuthUserCache(user._id);
 
       res.json(normalizeUser(user));
     } catch (error) {
@@ -225,6 +226,7 @@ router.patch("/:id/reject", async (req, res) => {
     user.rejectedAt = new Date();
     user.disabledAt = null;
     await user.save({ validateBeforeSave: false });
+    invalidateAuthUserCache(user._id);
 
     res.json(normalizeUser(user));
   } catch (error) {
@@ -321,6 +323,7 @@ router.patch("/:id/enable", async (req, res) => {
     user.disabledAt = null;
     user.rejectedAt = null;
     await user.save({ validateBeforeSave: false });
+    invalidateAuthUserCache(user._id);
 
     res.json(normalizeUser(user));
   } catch (error) {

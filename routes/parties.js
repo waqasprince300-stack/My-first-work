@@ -1,6 +1,10 @@
 const express = require("express");
 const router = express.Router();
 const Party = require("../models/Party");
+const GhausiaLot = require("../models/GhausiaLot");
+const Payment = require("../models/Payment");
+const PartyEdit = require("../models/PartyEdit");
+const PartyLedger = require("../models/PartyLedger");
 const {
   getDataOwnerId,
   isParty,
@@ -111,13 +115,27 @@ router.patch("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
     const party = await Party.findOneAndDelete({
       _id: req.params.id,
-      userId: getDataOwnerId(req.user),
+      userId,
     });
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
     }
+
+    // Cascade: clear party references from associated records so they don't become orphaned
+    const partyId = String(party._id);
+    const partyName = party.name || "";
+    const clearPartyRef = { $set: { partyId: "", partyName: "Unknown (deleted)" } };
+    const partyFilter = { userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
+    await Promise.all([
+      GhausiaLot.updateMany(partyFilter, clearPartyRef),
+      Payment.updateMany({ userId, $or: [{ partyId }, ...(partyName ? [{ party: partyName }] : [])] }, { $set: { partyId: "", party: "Unknown (deleted)" } }),
+      PartyEdit.deleteMany({ userId, lotId: { $in: (await GhausiaLot.find({ userId, partyId: "" }).select("_id").lean()).map(l => String(l._id)) } }).catch(() => {}),
+      PartyLedger.updateMany({ userId, partyId }, clearPartyRef),
+    ]).catch((err) => console.error("Party cascade cleanup error:", err));
+
     res.json({ message: "Party deleted successfully" });
   } catch (error) {
     res

@@ -24,6 +24,7 @@ const paymentSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
+      max: [100000000, "Amount cannot exceed 100,000,000"],
     },
     party: {
       type: String,

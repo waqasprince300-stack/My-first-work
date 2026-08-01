@@ -10,6 +10,7 @@ const http = require("http");
 const socketIO = require("socket.io");
 const connectDB = require("./config/db");
 const errorHandler = require("./middleware/errorHandler");
+const { authLimiter, apiLimiter } = require("./middleware/rateLimit");
 const authenticate = require("./middleware/auth");
 const {
   requireApproved,
@@ -182,8 +183,8 @@ app.param("id", (req, res, next, id) => {
 });
 
 // ✅ Routes
-// app.use('/api/auth', authRouter);
 app.use("/api", authRouter);
+app.use("/api", apiLimiter);
 app.use("/api/users", authenticate, requireApproved, usersRouter);
 app.use("/api/approval-users", authenticate, requireApproved, usersRouter);
 app.use("/api/approvals/users", authenticate, requireApproved, usersRouter);
