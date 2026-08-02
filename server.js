@@ -45,6 +45,10 @@ const server = http.createServer(app);
 const helmet = require("helmet");
 const morgan = require("morgan");
 
+// ✅ Required for cPanel/Namecheap — server runs behind a reverse proxy.
+// Without this, express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set("trust proxy", 1);
+
 app.use(helmet());
 app.use(morgan("dev"));
 

@@ -10,3 +10,7 @@ yarn-error.log*
 .vscode/
 *.swp
 *.swo
+
+*_upload.zip
+
+email_test.js
