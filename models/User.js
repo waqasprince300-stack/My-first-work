@@ -102,6 +102,11 @@ const userSchema = new mongoose.Schema(
       default: [],
       select: false,
     },
+    pushSubscriptions: {
+      type: Array,
+      default: [],
+      select: false,
+    },
   },
   {
     timestamps: true,

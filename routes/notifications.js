@@ -78,4 +78,35 @@ router.post("/read-all", async (req, res) => {
   }
 });
 
+/** POST /notifications/subscribe */
+router.post("/subscribe", async (req, res) => {
+  try {
+    const subscription = req.body;
+    if (!subscription || !subscription.endpoint) {
+      return res.status(400).json({ message: "Invalid subscription" });
+    }
+
+    const User = require("../models/User");
+    const user = await User.findById(req.user._id).select("+pushSubscriptions");
+    
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Check if subscription already exists
+    const exists = user.pushSubscriptions.some(
+      (sub) => sub.endpoint === subscription.endpoint
+    );
+
+    if (!exists) {
+      user.pushSubscriptions.push(subscription);
+      await user.save();
+    }
+
+    res.status(201).json({ message: "Subscribed successfully" });
+  } catch (error) {
+    res.status(500).json({ message: "Error subscribing", error: error.message });
+  }
+});
+
 module.exports = router;
