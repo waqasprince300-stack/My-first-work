@@ -16,7 +16,7 @@ const paymentSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["Received", "Paid"],
+      enum: ["Received", "Paid", "Tally"],
       required: true,
       default: "Received",
     },

@@ -967,11 +967,13 @@ router.patch("/:id", async (req, res) => {
       const dupattaDetails = body.dupattaDetails;
       let dupattaUpdateData = {};
       
-      dupattaUpdateData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
-      if (dupattaUpdateData.partyId) {
-        dupattaUpdateData.partyName = await resolvePartyName(dupattaUpdateData.partyId, dupattaDetails.partyName, userId);
-      } else {
-        dupattaUpdateData.partyName = "Unknown";
+      if (dupattaDetails.partyId !== undefined) {
+        dupattaUpdateData.partyId = String(dupattaDetails.partyId);
+        if (dupattaUpdateData.partyId) {
+          dupattaUpdateData.partyName = await resolvePartyName(dupattaUpdateData.partyId, dupattaDetails.partyName, userId);
+        } else {
+          dupattaUpdateData.partyName = "Unknown";
+        }
       }
       if (dupattaDetails.rate != null) dupattaUpdateData.rate = Number(dupattaDetails.rate);
       if (dupattaDetails.fabric) {
@@ -1140,7 +1142,6 @@ router.delete("/:id", async (req, res) => {
     const lot = await GhausiaLot.findOneAndDelete({
       _id: req.params.id,
       userId: getDataOwnerId(req.user),
-      businessOwnerId: req.businessOwnerId,
     });
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
