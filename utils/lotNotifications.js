@@ -4,6 +4,38 @@ const { getMailConfigError, sendLotNotificationEmail } = require("./email");
 
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 
+const webpush = require("web-push");
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT || "mailto:admin@example.com",
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+  );
+}
+
+async function sendWebPush(userId, payload) {
+  if (!process.env.VAPID_PUBLIC_KEY) return;
+  try {
+    const user = await User.findById(userId).select("+pushSubscriptions").lean();
+    if (!user || !user.pushSubscriptions || !user.pushSubscriptions.length) return;
+
+    const pushPromises = user.pushSubscriptions.map(sub =>
+      webpush.sendNotification(sub, JSON.stringify(payload)).catch(err => {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          // Subscription expired or unsubscribed, should be removed from DB in production
+          console.warn("[web-push] Subscription expired");
+        } else {
+          console.warn("[web-push] send error:", err);
+        }
+      })
+    );
+    await Promise.all(pushPromises);
+  } catch (error) {
+    console.warn("[web-push] general error:", error);
+  }
+}
+
+
 const frontendBaseUrl = () => {
   const raw =
     process.env.FRONTEND_URL ||
@@ -61,6 +93,16 @@ async function createAndEmailNotification({
     linkPath,
   });
 
+  const fullUrl = `${frontendBaseUrl()}${linkPath.startsWith("/") ? linkPath : `/${linkPath}`}`;
+
+  // Send Web Push Notification
+  await sendWebPush(user._id, {
+    title,
+    body,
+    url: fullUrl,
+    icon: "/seam-grace-logo.png",
+  });
+
   const email = String(user.email || "").trim();
   if (email && !getMailConfigError()) {
     try {
@@ -69,7 +111,7 @@ async function createAndEmailNotification({
         name: user.name,
         subject: title,
         body,
-        actionUrl: `${frontendBaseUrl()}${linkPath.startsWith("/") ? linkPath : `/${linkPath}`}`,
+        actionUrl: fullUrl,
       });
       doc.emailSentAt = new Date();
       await doc.save();
@@ -401,11 +443,227 @@ async function notifyPaymentRecorded({ payment, ownerId }) {
   }
 }
 
+/** Admin assigned a new lot to a party - notify the party users. */
+async function notifyLotAssigned({ lot, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const lotId = String(lot._id || lot.id || "").trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
+    const title = `New lot assigned — ${label}`;
+    const body = `The business assigned you a new lot ${label}. Open My Lots to view details.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "lot_assigned",
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyLotAssigned failed:", err?.message || err);
+  }
+}
+
+/** Admin approved a lot completion - notify the party users. */
+async function notifyLotApproved({ lot, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const lotId = String(lot._id || lot.id || "").trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
+    const title = `Lot completion approved — ${label}`;
+    const body = `The business approved the completion of lot ${label}. The final bill is ₨${Number(lot.billAmount || 0).toLocaleString()}. Open My Lots to view.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "lot_approved",
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyLotApproved failed:", err?.message || err);
+  }
+}
+
+/** Admin updated a lot - notify the party users. */
+async function notifyLotUpdated({ lot, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const lotId = String(lot._id || lot.id || "").trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
+    const title = `Lot updated — ${label}`;
+    const body = `The business updated the details of lot ${label}. Open My Lots to view changes.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "lot_updated",
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyLotUpdated failed:", err?.message || err);
+  }
+}
+
+/** Admin deleted a lot - notify the party users. */
+async function notifyLotDeleted({ lot, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const linkPath = `/party-ledger`;
+    const title = `Lot deleted — ${label}`;
+    const body = `The business deleted lot ${label}. It has been removed from your ledger.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "lot_deleted",
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyLotDeleted failed:", err?.message || err);
+  }
+}
+
+/** Admin updated a payment - notify the party users. */
+async function notifyPaymentUpdated({ payment, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    if (!oid || !payment) return;
+
+    const partyName = String(payment.party || "").trim();
+    const partyId = String(payment.partyId || "").trim();
+    if (!partyId && (!partyName || partyName.toLowerCase() === "owner")) return;
+
+    const partyUsers = await findPartyUsersByRef({
+      ownerId: oid,
+      partyId,
+      partyName,
+    });
+    if (!partyUsers.length) return;
+
+    const amount = Number(payment.amount) || 0;
+    const payType = String(payment.type || "").trim();
+    const linkPath = "/payments";
+    const amt = `₨${amount.toLocaleString()}`;
+
+    const title = `Payment updated — ${amt}`;
+    const body = `The business updated the details of your payment (${payType}: ${amt}). Open My Payments to review.`;
+    const paymentId = String(payment._id || payment.id || "").trim();
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "payment_updated",
+          title,
+          body,
+          lot: { id: paymentId ? `payment_update:${paymentId}` : "", businessOwnerId: payment.businessOwnerId },
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyPaymentUpdated failed:", err?.message || err);
+  }
+}
+
+/** Admin deleted a payment - notify the party users. */
+async function notifyPaymentDeleted({ payment, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    if (!oid || !payment) return;
+
+    const partyName = String(payment.party || "").trim();
+    const partyId = String(payment.partyId || "").trim();
+    if (!partyId && (!partyName || partyName.toLowerCase() === "owner")) return;
+
+    const partyUsers = await findPartyUsersByRef({
+      ownerId: oid,
+      partyId,
+      partyName,
+    });
+    if (!partyUsers.length) return;
+
+    const amount = Number(payment.amount) || 0;
+    const linkPath = "/payments";
+    const amt = `₨${amount.toLocaleString()}`;
+
+    const title = `Payment deleted — ${amt}`;
+    const body = `The business deleted a payment record (${amt}). It has been removed from your payments list.`;
+    const paymentId = String(payment._id || payment.id || "").trim();
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "payment_deleted",
+          title,
+          body,
+          lot: { id: paymentId ? `payment_del:${paymentId}` : "", businessOwnerId: payment.businessOwnerId },
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyPaymentDeleted failed:", err?.message || err);
+  }
+}
+
 module.exports = {
   notifyLotRejected,
   notifyLotPendingReview,
   notifyBillRevisionRequest,
   notifyBillRevisionResolved,
   notifyPaymentRecorded,
+  notifyLotAssigned,
+  notifyLotApproved,
+  notifyLotUpdated,
+  notifyLotDeleted,
+  notifyPaymentUpdated,
+  notifyPaymentDeleted,
   frontendBaseUrl,
 };

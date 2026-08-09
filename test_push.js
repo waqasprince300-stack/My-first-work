@@ -1,0 +1,1 @@
+const mongoose = require('mongoose'); require('dotenv').config(); mongoose.connect(process.env.MONGO_URI).then(async () => { const db = mongoose.connection.db; const users = await db.collection('users').find({ 'pushSubscriptions': { $exists: true, $not: {$size: 0} } }).toArray(); console.log('Users with push subs:', users.length); process.exit(0); });

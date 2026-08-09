@@ -20,6 +20,10 @@ const { emitOrgChange } = require("../utils/realtime");
 const {
   notifyLotRejected,
   notifyLotPendingReview,
+  notifyLotAssigned,
+  notifyLotApproved,
+  notifyLotUpdated,
+  notifyLotDeleted,
 } = require("../utils/lotNotifications");
 
 const { toDateOrNull, toDateOrNow } = require("../utils/dateHelpers");
@@ -526,7 +530,8 @@ router.post("/:id/approve-completion", async (req, res) => {
       lot.businessOwnerId,
     );
     res.json(lot);
-    emitOrgChange(req, "lot", { lotId: String(lot._id) });
+    emitOrgChange(req, "lot", { lotId: String(lot._id), action: "lot_approved", linkPath: `/party-ledger?lotId=${String(lot._id)}` });
+    void notifyLotApproved({ lot: lot.toObject({ virtuals: true }), ownerId: userId });
   } catch (error) {
     res
       .status(400)
@@ -745,7 +750,11 @@ router.post("/", async (req, res) => {
     } else {
       res.status(201).json(savedMainLot);
     }
-    emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
+    emitOrgChange(req, "lot", { lotId: String(savedMainLot._id), action: "lot_assigned", linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}` });
+    void notifyLotAssigned({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
+    if (savedDupattaLot) {
+      void notifyLotAssigned({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
+    }
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
@@ -1092,7 +1101,23 @@ router.patch("/:id", async (req, res) => {
       });
       void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
     } else {
-      emitOrgChange(req, "lot", { lotId: String(lot._id) });
+      let actionName = undefined;
+      let linkPathStr = undefined;
+      const oldPartyId = String(existing.partyId || "");
+      const newPartyId = String(lotObj.partyId || "");
+      if (newPartyId && oldPartyId !== newPartyId) {
+        actionName = "lot_assigned";
+        linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
+        void notifyLotAssigned({ lot: lotObj, ownerId: userId });
+      } else if (!isParty(req.user)) {
+        void notifyLotUpdated({ lot: lotObj, ownerId: userId });
+      }
+      
+      emitOrgChange(req, "lot", { 
+        lotId: String(lot._id), 
+        ...(actionName && { action: actionName }),
+        ...(linkPathStr && { linkPath: linkPathStr })
+      });
     }
     res.json(lot);
   } catch (error) {

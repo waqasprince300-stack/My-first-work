@@ -13,7 +13,7 @@ const {
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
 const { emitOrgChange } = require("../utils/realtime");
-const { notifyPaymentRecorded } = require("../utils/lotNotifications");
+const { notifyPaymentRecorded, notifyPaymentUpdated, notifyPaymentDeleted } = require("../utils/lotNotifications");
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 const stripOwnership = ({ userId: _userId, ...data }) => data;
@@ -244,7 +244,8 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
     res.json(normalize(payment));
-    emitOrgChange(req, "payment", { paymentId: String(payment._id) });
+    emitOrgChange(req, "payment", { paymentId: String(payment._id), action: "payment_updated", linkPath: "/payments" });
+    void notifyPaymentUpdated({ payment: payment.toObject ? payment.toObject() : payment, ownerId: userId });
   } catch (error) {
     res
       .status(400)
@@ -265,7 +266,8 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
     res.json({ message: "Payment deleted successfully" });
-    emitOrgChange(req, "payment", { paymentId: String(payment._id) });
+    emitOrgChange(req, "payment", { paymentId: String(payment._id), action: "payment_deleted", linkPath: "/payments" });
+    void notifyPaymentDeleted({ payment: payment.toObject ? payment.toObject() : payment, ownerId: getDataOwnerId(req.user) });
   } catch (error) {
     res
       .status(500)
