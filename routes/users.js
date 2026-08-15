@@ -12,6 +12,7 @@ const router = express.Router();
 
 const normalizeUser = (user) => user.toJSON();
 
+
 const findAdminParty = async (adminId, partyId, businessOwnerId) => {
   if (!partyId) return null;
   const party = await Party.findOne({ _id: partyId, userId: adminId });
