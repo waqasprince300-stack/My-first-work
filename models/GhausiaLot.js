@@ -215,6 +215,7 @@ ghausiaLotSchema.index(
 );
 ghausiaLotSchema.index({ userId: 1, businessOwnerId: 1, receivedDate: -1 });
 ghausiaLotSchema.index({ userId: 1, partyId: 1 });
+ghausiaLotSchema.index({ userId: 1, createdAt: -1 });
 ghausiaLotSchema.index({ userId: 1, receivedDate: -1 });
 ghausiaLotSchema.index({
   userId: 1,
