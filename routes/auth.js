@@ -21,17 +21,7 @@ const { authLimiter, otpLimiter } = require("../middleware/rateLimit");
 
 const router = express.Router();
 
-const getJwtSecret = () => {
-  if (process.env.JWT_SECRET) {
-    return process.env.JWT_SECRET;
-  }
-
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("JWT_SECRET is required");
-  }
-
-  return "development-jwt-secret-change-me";
-};
+const { getJwtSecret } = require("../utils/jwt");
 
 const signToken = (userId) => {
   return jwt.sign({ id: userId }, getJwtSecret(), {

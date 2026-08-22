@@ -50,7 +50,9 @@ const morgan = require("morgan");
 app.set("trust proxy", 1);
 
 app.use(helmet());
-app.use(morgan("dev"));
+if (process.env.NODE_ENV !== "production") {
+  app.use(morgan("dev"));
+}
 
 // ✅ Allowed origins (FIXED)
 const getAllowedOrigins = () => {
@@ -134,12 +136,7 @@ const User = require("./models/User");
 const { getDataOwnerId } = require("./utils/access");
 const { orgRoom } = require("./utils/realtime");
 
-const getSocketJwtSecret = () =>
-  process.env.JWT_SECRET ||
-  (process.env.NODE_ENV === "production"
-    ? null
-    : "development-jwt-secret-change-me");
-
+const { getSocketJwtSecret } = require("./utils/jwt");
 io.use(async (socket, next) => {
   // Auth is best-effort: an unauthenticated socket simply joins no room (receives nothing).
   try {

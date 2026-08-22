@@ -471,7 +471,15 @@ router.post("/:id/approve-completion", async (req, res) => {
       return res.status(400).json({ message: "Lot is not awaiting approval" });
     }
 
-    lot.status = "received back";
+    const skipBillable = Boolean(req.body?.skipBillable);
+    
+    if (skipBillable) {
+      lot.status = "completed";
+      lot.receivedBackDate = new Date();
+    } else {
+      lot.status = "received back";
+    }
+    
     lot.rejectionNote = "";
     lot.completionApprovedAt = new Date();
 
@@ -863,6 +871,7 @@ router.patch("/:id", async (req, res) => {
 
     let newDupattaLot = null;
     let dupattaToDelete = null;
+    let updatedLinkedLot = null;
 
     const isMainComponent = !existing.suitComponent || existing.suitComponent === "main";
 
@@ -949,6 +958,7 @@ router.patch("/:id", async (req, res) => {
          await existingDupatta.save();
          await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, existing.businessOwnerId);
          emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
+         updatedLinkedLot = existingDupatta;
       } else {
          await ensureLotNumberUniqueInCollection(
            userId,
@@ -1038,10 +1048,10 @@ router.patch("/:id", async (req, res) => {
          );
       }
       
-      const updatedDupatta = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, dupattaUpdateData, { new: true });
-      if (updatedDupatta) {
-         await syncPartyLedgerForLot(updatedDupatta.toObject({ virtuals: true }), userId, existing.businessOwnerId);
-         emitOrgChange(req, "lot", { lotId: String(updatedDupatta._id) });
+      updatedLinkedLot = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, dupattaUpdateData, { new: true });
+      if (updatedLinkedLot) {
+         await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, existing.businessOwnerId);
+         emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
       }
     } else if (existing.suitType === "3-piece" && payload.suitType !== undefined && payload.suitType !== "3-piece" && isMainComponent) {
       payload.suitComponent = "main";
@@ -1051,12 +1061,12 @@ router.patch("/:id", async (req, res) => {
         dupattaToDelete = existing.linkedLotId;
       }
     } else if (payload.syncMainLotPieces && existing.suitComponent === "dupatta" && existing.linkedLotId && payload.pieces !== undefined) {
-      const updatedMain = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, {
+      updatedLinkedLot = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, {
         pieces: payload.pieces,
         quantity: payload.quantity
       }, { new: true });
-      if (updatedMain) {
-        emitOrgChange(req, "lot", { lotId: String(updatedMain._id) });
+      if (updatedLinkedLot) {
+        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
       }
     }
 
@@ -1121,7 +1131,14 @@ router.patch("/:id", async (req, res) => {
         ...(linkPathStr && { linkPath: linkPathStr })
       });
     }
-    res.json(lot);
+    if (newDupattaLot || updatedLinkedLot) {
+      const responseLots = [lotObj];
+      if (newDupattaLot) responseLots.push(newDupattaLot.toObject({ virtuals: true }));
+      if (updatedLinkedLot) responseLots.push(updatedLinkedLot.toObject({ virtuals: true }));
+      res.json(responseLots);
+    } else {
+      res.json(lot);
+    }
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
       return res.status(409).json({ message: error.message });
@@ -1147,20 +1164,27 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Lot not found" });
     }
     
+    let deletedLinkedId = null;
+    let updatedLinkedLot = null;
+
     // Delete linked lot if it exists
     if (lot.linkedLotId) {
-      if (lot.suitComponent === "main") {
+      if (!lot.suitComponent || lot.suitComponent === "main") {
         await GhausiaLot.findByIdAndDelete(lot.linkedLotId);
-        await PartyLedger.deleteMany({ lotId: String(lot.linkedLotId) });
+        await Promise.all([
+          PartyLedger.deleteMany({ lotId: String(lot.linkedLotId) }),
+          PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }),
+        ]);
         emitOrgChange(req, "lot", { lotId: String(lot.linkedLotId) });
+        deletedLinkedId = String(lot.linkedLotId);
       } else if (lot.suitComponent === "dupatta") {
-        const mainLot = await GhausiaLot.findByIdAndUpdate(lot.linkedLotId, {
+        updatedLinkedLot = await GhausiaLot.findByIdAndUpdate(lot.linkedLotId, {
           suitType: "2-piece",
           linkedLotId: null,
           ownerBillingChoice: "separate"
         }, { new: true });
-        if (mainLot) {
-          emitOrgChange(req, "lot", { lotId: String(mainLot._id) });
+        if (updatedLinkedLot) {
+          emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
         }
       }
     }
@@ -1170,7 +1194,11 @@ router.delete("/:id", async (req, res) => {
       PartyEdit.deleteMany({ lotId: String(lot._id), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }),
     ]);
     
-    res.json({ message: "Lot deleted successfully" });
+    const responsePayload = { message: "Lot deleted successfully" };
+    if (deletedLinkedId) responsePayload.deletedLinkedId = deletedLinkedId;
+    if (updatedLinkedLot) responsePayload.updatedLinkedLot = updatedLinkedLot.toObject({ virtuals: true });
+    
+    res.json(responsePayload);
     emitOrgChange(req, "lot", { lotId: String(lot._id) });
   } catch (error) {
     res
