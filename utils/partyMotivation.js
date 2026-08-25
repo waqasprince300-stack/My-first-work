@@ -6,7 +6,7 @@ const LOOKBACK_DAYS = 90;
  * Calculate performance metrics and generate Roman Urdu motivational
  * messages for a single party (identified by partyId + ownerId).
  */
-async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
+async function calculatePartyMotivation({ partyId, partyName, ownerId, isAdminView = false }) {
   const since = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const now = new Date();
 
@@ -33,7 +33,9 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
           type: "warning",
           icon: "📋",
           title: "Koi kaam nahi mila",
-          body: "Pichle 3 mahine mein koi lot assign nahi hua. Business se rabta karein.",
+          body: isAdminView 
+            ? "Pichle 3 mahine mein inko koi lot assign nahi hua. Party se rabta karein."
+            : "Pichle 3 mahine mein koi lot assign nahi hua. Business se rabta karein.",
         },
       ],
       stats: { totalLots: 0 },
@@ -135,21 +137,27 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "achievement",
       icon: "🚀",
       title: "Bohat tez kaam!",
-      body: `Aap average ${avgReturnDays} din mein lot return karte hain — Shandar speed!`,
+      body: isAdminView 
+        ? `Ye party average ${avgReturnDays} din mein lot return karti hai — Shandar speed!` 
+        : `Aap average ${avgReturnDays} din mein lot return karte hain — Shandar speed!`,
     });
   } else if (avgReturnDays !== null && avgReturnDays <= 14) {
     encouragements.push({
       type: "encouragement",
       icon: "⚡",
-      title: "Achi speed hai!",
-      body: `Average ${avgReturnDays} din mein lot return — thori aur mehnat se top pe aa sakte hain!`,
+      title: isAdminView ? "Inki speed achi hai!" : "Achi speed hai!",
+      body: isAdminView 
+        ? `Average ${avgReturnDays} din mein lot return — inho ne acha maintain kia hai!` 
+        : `Average ${avgReturnDays} din mein lot return — thori aur mehnat se top pe aa sakte hain!`,
     });
   } else if (avgReturnDays !== null && avgReturnDays > 20) {
     warnings.push({
       type: "warning",
       icon: "⏳",
-      title: "Return slow hai",
-      body: `Average ${avgReturnDays} din lag rahe hain lot return mein — jaldi kaam karne ki koshish karein.`,
+      title: isAdminView ? "Party ka return slow hai" : "Return slow hai",
+      body: isAdminView 
+        ? `Average ${avgReturnDays} din lag rahe hain lot return mein — inki speed check karein.` 
+        : `Average ${avgReturnDays} din lag rahe hain lot return mein — jaldi kaam karne ki koshish karein.`,
     });
   }
 
@@ -159,14 +167,18 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "achievement",
       icon: "🔥",
       title: `${streak} lots lagatar approved!`,
-      body: "Koi rejection nahi — Behtareen quality ka kaam kar rahe hain!",
+      body: isAdminView 
+        ? "Koi rejection nahi — Inki quality bohat behtareen chal rahi hai!" 
+        : "Koi rejection nahi — Behtareen quality ka kaam kar rahe hain!",
     });
   } else if (streak >= 5) {
     encouragements.push({
       type: "encouragement",
       icon: "🔥",
       title: `${streak} lots lagatar bina rejection!`,
-      body: "Bohat acha — isi tarah quality maintain karein!",
+      body: isAdminView 
+        ? "Inho ne quality achi maintain ki hui hai!" 
+        : "Bohat acha — isi tarah quality maintain karein!",
     });
   }
 
@@ -180,21 +192,23 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       body:
         completedLastMonth > 0
           ? `Pichle mahine se ${diff} zyada — Great progress!`
-          : "Bohat acha kaam ho raha hai — keep going!",
+          : (isAdminView ? "Inki progress achi ja rahi hai!" : "Bohat acha kaam ho raha hai — keep going!"),
     });
   } else if (completedThisMonth > 0 && completedThisMonth === completedLastMonth) {
     encouragements.push({
       type: "encouragement",
       icon: "📊",
       title: `Is mahine ${completedThisMonth} lots complete`,
-      body: "Pichle mahine jitna hi — thora aur push karein!",
+      body: isAdminView ? "Pichle mahine jitna hi volume hai." : "Pichle mahine jitna hi — thora aur push karein!",
     });
   } else if (completedThisMonth < completedLastMonth && completedLastMonth > 0) {
     warnings.push({
       type: "warning",
       icon: "📉",
       title: `Is mahine sirf ${completedThisMonth} lots complete`,
-      body: `Pichle mahine ${completedLastMonth} the — speed barhaein!`,
+      body: isAdminView 
+        ? `Pichle mahine ${completedLastMonth} the — inko mazeed lots dein ya speed ka bolein.` 
+        : `Pichle mahine ${completedLastMonth} the — speed barhaein!`,
     });
   }
 
@@ -204,14 +218,18 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "achievement",
       icon: "✅",
       title: "0% rejection rate!",
-      body: "Aap ka koi bhi lot reject nahi hua — Perfect quality record!",
+      body: isAdminView 
+        ? "Inka koi bhi lot reject nahi hua — Perfect quality record!" 
+        : "Aap ka koi bhi lot reject nahi hua — Perfect quality record!",
     });
   } else if (rejectionRate > 20) {
     warnings.push({
       type: "warning",
       icon: "⚠️",
       title: `Rejection rate ${rejectionRate}% hai`,
-      body: `${rejectedCount} lots reject hue hain — quality pe dhyan dein.`,
+      body: isAdminView 
+        ? `${rejectedCount} lots reject hue hain — inki quality monitor karein.` 
+        : `${rejectedCount} lots reject hue hain — quality pe dhyan dein.`,
     });
   }
 
@@ -221,7 +239,9 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "warning",
       icon: "📋",
       title: `${pendingCount} lots pending hain`,
-      body: "Pending kaam zyada hai — jaldi complete karne ki koshish karein.",
+      body: isAdminView 
+        ? "Inke paas pending kaam zyada hai — follow-up karein." 
+        : "Pending kaam zyada hai — jaldi complete karne ki koshish karein.",
     });
   }
 
@@ -231,7 +251,9 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "achievement",
       icon: "⚡",
       title: `Sabse tez lot sirf ${fastestReturn} din mein!`,
-      body: "Super fast return — bohat zabardast kaam!",
+      body: isAdminView 
+        ? "Super fast return — is party ka record zabardast hai!" 
+        : "Super fast return — bohat zabardast kaam!",
     });
   }
 
@@ -242,7 +264,9 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "encouragement",
       icon: "💰",
       title: `${formatted} ka kaam complete!`,
-      body: "3 mahine mein bohat acha kaam kia hai — isi tarah lagey rahein!",
+      body: isAdminView 
+        ? "3 mahine mein inho ne acha business generate kia hai!" 
+        : "3 mahine mein bohat acha kaam kia hai — isi tarah lagey rahein!",
     });
   }
 
@@ -255,7 +279,9 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId }) {
       type: "encouragement",
       icon: "👋",
       title: "Kaam jaari hai",
-      body: `Aap ke paas ${totalLots} lots hain pichle 3 mahine mein — mehnat jaari rakhein!`,
+      body: isAdminView 
+        ? `Inke paas ${totalLots} lots aayi hain pichle 3 mahine mein.` 
+        : `Aap ke paas ${totalLots} lots hain pichle 3 mahine mein — mehnat jaari rakhein!`,
     });
   }
 
@@ -275,6 +301,7 @@ async function calculateAllPartiesMotivation({ ownerId, parties }) {
         partyId: String(p._id || p.id || ""),
         partyName: p.name,
         ownerId,
+        isAdminView: true,
       });
       return {
         partyId: String(p._id || p.id || ""),
