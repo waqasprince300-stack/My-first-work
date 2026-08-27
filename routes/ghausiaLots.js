@@ -812,6 +812,12 @@ router.patch("/:id", async (req, res) => {
     const payload = await normalizeLotUpdatePayload(body, userId);
     delete payload.completionApprovedAt;
 
+    // ── Admin-only: move lot to a different workspace ──
+    const moveTarget = String(body.moveToBusinessOwnerId || "").trim();
+    if (moveTarget && !isParty(req.user) && moveTarget !== String(existing.businessOwnerId || "")) {
+      payload.businessOwnerId = moveTarget;
+    }
+
     if (!isParty(req.user)) {
       const cur = normalizeStatus(existing.status);
       const next =
@@ -1103,6 +1109,19 @@ router.patch("/:id", async (req, res) => {
       await GhausiaLot.findByIdAndDelete(dupattaToDelete);
       await PartyLedger.deleteMany({ lotId: String(dupattaToDelete) });
       emitOrgChange(req, "lot", { lotId: String(dupattaToDelete) });
+    }
+
+    // ── If lot was moved to a new workspace, also move the linked lot + resync ledger ──
+    if (moveTarget && payload.businessOwnerId === moveTarget && existing.linkedLotId) {
+      const linkedMoved = await GhausiaLot.findByIdAndUpdate(
+        existing.linkedLotId,
+        { businessOwnerId: moveTarget },
+        { new: true }
+      );
+      if (linkedMoved) {
+        await syncPartyLedgerForLot(linkedMoved.toObject({ virtuals: true }), userId, moveTarget);
+        emitOrgChange(req, "lot", { lotId: String(linkedMoved._id) });
+      }
     }
 
     if (becamePendingApproval) {
