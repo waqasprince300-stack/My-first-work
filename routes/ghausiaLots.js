@@ -979,8 +979,8 @@ router.patch("/:id", async (req, res) => {
          payload.linkedLotId = newDupattaLot._id;
          newDupattaLot.linkedLotId = existing._id;
       }
-    } else if (existing.suitType === "3-piece" && payload.suitType === "3-piece" && body.dupattaDetails && existing.linkedLotId && isMainComponent) {
-      const dupattaDetails = body.dupattaDetails;
+    } else if (existing.suitType === "3-piece" && payload.suitType === "3-piece" && existing.linkedLotId && isMainComponent) {
+      const dupattaDetails = body.dupattaDetails || {};
       let dupattaUpdateData = {};
       
       if (dupattaDetails.partyId !== undefined) {

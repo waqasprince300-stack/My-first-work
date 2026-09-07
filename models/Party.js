@@ -90,6 +90,10 @@ const partySchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

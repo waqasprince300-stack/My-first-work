@@ -32,6 +32,10 @@ const businessOwnerSchema = new mongoose.Schema(
       enum: ["active", "inactive"],
       default: "active",
     },
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

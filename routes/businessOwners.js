@@ -22,6 +22,7 @@ router.get("/", async (req, res) => {
     const owners = await BusinessOwner.find({
       userId: getDataOwnerId(req.user),
       status: "active",
+      deletedAt: null,
     })
       .sort({ isDefault: -1, createdAt: 1 })
       .lean();
@@ -31,6 +32,27 @@ router.get("/", async (req, res) => {
       .status(500)
       .json({
         message: "Error fetching business owners",
+        error: error.message,
+      });
+  }
+});
+
+// Get deleted business owners (trash)
+router.get("/trash", async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const owners = await BusinessOwner.find({
+      userId: getDataOwnerId(req.user),
+      deletedAt: { $ne: null },
+    })
+      .sort({ deletedAt: -1 })
+      .lean();
+    res.json(owners.map((doc) => ({ ...doc, id: String(doc._id) })));
+  } catch (error) {
+    res
+      .status(500)
+      .json({
+        message: "Error fetching trashed business owners",
         error: error.message,
       });
   }
@@ -91,7 +113,7 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-/** DELETE workspace (BusinessOwner) and scoped data. Requires ?force=true if related rows exist. */
+/** Soft-delete workspace (move to trash). */
 router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
@@ -104,7 +126,79 @@ router.delete("/:id", async (req, res) => {
     const owner = await BusinessOwner.findOne({
       _id: rawId,
       userId: uid,
-      status: "active",
+    });
+
+    if (!owner) {
+      return res.status(404).json({ message: "Business owner not found" });
+    }
+
+    // Soft delete
+    const deletedSuffix = ` (Deleted ${Date.now()})`;
+    owner.deletedAt = new Date();
+    owner.name = owner.name + deletedSuffix;
+    await owner.save();
+
+    await require("../models/User").updateMany(
+      { role: "party", ownerId: uid, businessOwnerId: String(owner._id) },
+      { $set: { status: "disabled", disabledAt: new Date() } }
+    ).catch(err => console.error("Error disabling users on soft delete:", err));
+
+    return res.status(204).send();
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error moving business owner to trash", error: error.message });
+  }
+});
+
+/** Restore workspace from trash. */
+router.post("/:id/restore", async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const uid = getDataOwnerId(req.user);
+    const owner = await BusinessOwner.findOne({
+      _id: req.params.id,
+      userId: uid,
+      deletedAt: { $ne: null },
+    });
+
+    if (!owner) {
+      return res.status(404).json({ message: "Workspace not found in trash" });
+    }
+
+    owner.deletedAt = null;
+    owner.name = owner.name.replace(/ \(Deleted \d+\)$/, "");
+    await owner.save();
+
+    await require("../models/User").updateMany(
+      { role: "party", ownerId: uid, businessOwnerId: String(owner._id), status: "disabled" },
+      { $set: { status: "approved", disabledAt: null } }
+    ).catch(err => console.error("Error enabling users on restore:", err));
+
+    res.json(normalize(owner));
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "Cannot restore: A workspace with this name already exists." });
+    }
+    res
+      .status(500)
+      .json({ message: "Error restoring workspace", error: error.message });
+  }
+});
+
+/** DELETE workspace permanently and scoped data. Requires ?force=true if related rows exist. */
+router.delete("/:id/permanent", async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const rawId = String(req.params.id || "").trim();
+    if (!mongoose.Types.ObjectId.isValid(rawId)) {
+      return res.status(400).json({ message: "Invalid workspace id" });
+    }
+
+    const uid = getDataOwnerId(req.user);
+    const owner = await BusinessOwner.findOne({
+      _id: rawId,
+      userId: uid,
     });
 
     if (!owner) {
@@ -160,7 +254,7 @@ router.delete("/:id", async (req, res) => {
     if (!force && totalRelated > 0) {
       return res.status(409).json({
         message:
-          "This workspace has data. Repeat the request with ?force=true to delete the workspace, remove all related records, and disable party logins scoped to this workspace.",
+          "This workspace has data. Repeat the request with ?force=true to permanently delete the workspace and remove all related records.",
         counts,
       });
     }
@@ -171,6 +265,10 @@ router.delete("/:id", async (req, res) => {
       Payment.deleteMany(workspaceFilter),
       GhausiaLot.deleteMany(workspaceFilter),
       Party.deleteMany(workspaceFilter),
+      Party.updateMany(
+        { userId: uid },
+        { $pull: { workspaceOverrides: { businessOwnerId: String(bid) } } }
+      ),
       Collection.deleteMany(workspaceFilter),
       RateCalculation.deleteMany(workspaceFilter),
       SavedDesign.deleteMany(workspaceFilter),
@@ -198,7 +296,7 @@ router.delete("/:id", async (req, res) => {
   } catch (error) {
     res
       .status(500)
-      .json({ message: "Error deleting business owner", error: error.message });
+      .json({ message: "Error deleting business owner permanently", error: error.message });
   }
 });
 

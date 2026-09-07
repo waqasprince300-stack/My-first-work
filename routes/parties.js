@@ -19,8 +19,8 @@ const stripOwnership = ({ userId: _userId, businessOwnerId: _businessOwnerId, ..
 router.get("/", async (req, res) => {
   try {
     const filter = isParty(req.user)
-      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
-      : { userId: getDataOwnerId(req.user) };
+      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: null }
+      : { userId: getDataOwnerId(req.user), deletedAt: null };
     const pagination = parsePaginationQuery(req, 8);
     const sort = { name: 1 };
     if (pagination.paginate) {
@@ -50,12 +50,28 @@ router.get("/", async (req, res) => {
   }
 });
 
+// Get deleted parties (trash)
+router.get("/trash", async (req, res) => {
+  try {
+    const filter = isParty(req.user)
+      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: { $ne: null } }
+      : { userId: getDataOwnerId(req.user), deletedAt: { $ne: null } };
+    
+    const parties = await Party.find(filter).sort({ deletedAt: -1 }).lean();
+    res.json(parties);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error fetching trashed parties", error: error.message });
+  }
+});
+
 // Get single party
 router.get("/:id", async (req, res) => {
   try {
     const filter = isParty(req.user)
-      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId }
-      : { userId: getDataOwnerId(req.user), _id: req.params.id };
+      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: null }
+      : { userId: getDataOwnerId(req.user), _id: req.params.id, deletedAt: null };
     const party = await Party.findOne(filter).lean();
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
@@ -111,8 +127,75 @@ router.patch("/:id", async (req, res) => {
   }
 });
 
-// Delete party
+// Soft-delete party (move to trash)
 router.delete("/:id", async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
+    const party = await Party.findOne({
+      _id: req.params.id,
+      userId,
+    });
+    if (!party) {
+      return res.status(404).json({ message: "Party not found" });
+    }
+
+    // Soft delete: set deletedAt and append suffix to name to avoid unique constraint issues if recreated
+    const deletedSuffix = ` (Deleted ${Date.now()})`;
+    party.deletedAt = new Date();
+    party.name = party.name + deletedSuffix;
+    await party.save();
+
+    await require("../models/User").updateMany(
+      { role: "party", ownerId: userId, partyId: String(party._id) },
+      { $set: { status: "disabled", disabledAt: new Date() } }
+    ).catch(err => console.error("Error disabling users on soft delete:", err));
+
+    res.json({ message: "Party moved to trash successfully", party });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error moving party to trash", error: error.message });
+  }
+});
+
+// Restore party from trash
+router.post("/:id/restore", async (req, res) => {
+  try {
+    if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
+    const party = await Party.findOne({
+      _id: req.params.id,
+      userId,
+      deletedAt: { $ne: null }
+    });
+    
+    if (!party) {
+      return res.status(404).json({ message: "Party not found in trash" });
+    }
+
+    party.deletedAt = null;
+    party.name = party.name.replace(/ \(Deleted \d+\)$/, "");
+    await party.save();
+
+    await require("../models/User").updateMany(
+      { role: "party", ownerId: userId, partyId: String(party._id), status: "disabled" },
+      { $set: { status: "approved", disabledAt: null } }
+    ).catch(err => console.error("Error enabling users on restore:", err));
+
+    res.json({ message: "Party restored successfully", party });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "Cannot restore: A party with this name already exists in the active list." });
+    }
+    res
+      .status(500)
+      .json({ message: "Error restoring party", error: error.message });
+  }
+});
+
+// Delete party permanently
+router.delete("/:id/permanent", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
@@ -126,7 +209,8 @@ router.delete("/:id", async (req, res) => {
 
     // Cascade: clear party references from associated records so they don't become orphaned
     const partyId = String(party._id);
-    const partyName = party.name || "";
+    // Strip out the (Deleted timestamp) suffix if it exists for cascading text fields
+    const partyName = (party.name || "").replace(/ \(Deleted \d+\)$/, "");
     const clearPartyRef = { $set: { partyId: "", partyName: "Unknown (deleted)" } };
     const partyFilter = { userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
     await Promise.all([
@@ -134,13 +218,17 @@ router.delete("/:id", async (req, res) => {
       Payment.updateMany({ userId, $or: [{ partyId }, ...(partyName ? [{ party: partyName }] : [])] }, { $set: { partyId: "", party: "Unknown (deleted)" } }),
       PartyEdit.deleteMany({ userId, lotId: { $in: (await GhausiaLot.find({ userId, partyId: "" }).select("_id").lean()).map(l => String(l._id)) } }).catch(() => {}),
       PartyLedger.updateMany({ userId, partyId }, clearPartyRef),
+      require("../models/User").updateMany(
+        { role: "party", ownerId: userId, partyId },
+        { $set: { status: "disabled", disabledAt: new Date(), partyId: "", partyName: "Unknown (deleted)" } }
+      ),
     ]).catch((err) => console.error("Party cascade cleanup error:", err));
 
-    res.json({ message: "Party deleted successfully" });
+    res.json({ message: "Party deleted permanently" });
   } catch (error) {
     res
       .status(500)
-      .json({ message: "Error deleting party", error: error.message });
+      .json({ message: "Error permanently deleting party", error: error.message });
   }
 });
 
