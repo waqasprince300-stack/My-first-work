@@ -81,6 +81,10 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    disabledReason: {
+      type: String,
+      default: "",
+    },
     passwordResetToken: {
       type: String,
       select: false,

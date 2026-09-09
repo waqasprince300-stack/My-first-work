@@ -139,6 +139,9 @@ router.delete("/:id", async (req, res) => {
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
     }
+    if (party.deletedAt) {
+      return res.status(400).json({ message: "Party is already in trash" });
+    }
 
     // Soft delete: set deletedAt and append suffix to name to avoid unique constraint issues if recreated
     const deletedSuffix = ` (Deleted ${Date.now()})`;
@@ -146,10 +149,19 @@ router.delete("/:id", async (req, res) => {
     party.name = party.name + deletedSuffix;
     await party.save();
 
-    await require("../models/User").updateMany(
-      { role: "party", ownerId: userId, partyId: String(party._id) },
-      { $set: { status: "disabled", disabledAt: new Date() } }
+    const User = require("../models/User");
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+
+    const usersToDisable = await User.find({ role: "party", ownerId: userId, partyId: String(party._id), status: { $in: ["approved", "pending"] } }).select("_id").lean();
+
+    await User.updateMany(
+      { _id: { $in: usersToDisable.map(u => u._id) } },
+      { $set: { status: "disabled", disabledAt: new Date(), disabledReason: "party_deleted" } }
     ).catch(err => console.error("Error disabling users on soft delete:", err));
+
+    for (const u of usersToDisable) {
+      invalidateAuthUserCache(u._id);
+    }
 
     res.json({ message: "Party moved to trash successfully", party });
   } catch (error) {
@@ -178,10 +190,19 @@ router.post("/:id/restore", async (req, res) => {
     party.name = party.name.replace(/ \(Deleted \d+\)$/, "");
     await party.save();
 
-    await require("../models/User").updateMany(
-      { role: "party", ownerId: userId, partyId: String(party._id), status: "disabled" },
-      { $set: { status: "approved", disabledAt: null } }
+    const User = require("../models/User");
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+
+    const usersToEnable = await User.find({ role: "party", ownerId: userId, partyId: String(party._id), status: "disabled", disabledReason: "party_deleted" }).select("_id").lean();
+
+    await User.updateMany(
+      { _id: { $in: usersToEnable.map(u => u._id) } },
+      { $set: { status: "approved", disabledAt: null, disabledReason: "" } }
     ).catch(err => console.error("Error enabling users on restore:", err));
+
+    for (const u of usersToEnable) {
+      invalidateAuthUserCache(u._id);
+    }
 
     res.json({ message: "Party restored successfully", party });
   } catch (error) {
@@ -213,16 +234,27 @@ router.delete("/:id/permanent", async (req, res) => {
     const partyName = (party.name || "").replace(/ \(Deleted \d+\)$/, "");
     const clearPartyRef = { $set: { partyId: "", partyName: "Unknown (deleted)" } };
     const partyFilter = { userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
+    
+    // Find lots belonging to this party BEFORE clearing their partyId
+    const lotsOfParty = await GhausiaLot.find(partyFilter).select("_id").lean();
+    const lotIds = lotsOfParty.map(l => String(l._id));
+
+    const User = require("../models/User");
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+    const userFilter = { role: "party", ownerId: userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
+    const usersToDisable = await User.find(userFilter).select("_id").lean();
+
     await Promise.all([
       GhausiaLot.updateMany(partyFilter, clearPartyRef),
       Payment.updateMany({ userId, $or: [{ partyId }, ...(partyName ? [{ party: partyName }] : [])] }, { $set: { partyId: "", party: "Unknown (deleted)" } }),
-      PartyEdit.deleteMany({ userId, lotId: { $in: (await GhausiaLot.find({ userId, partyId: "" }).select("_id").lean()).map(l => String(l._id)) } }).catch(() => {}),
-      PartyLedger.updateMany({ userId, partyId }, clearPartyRef),
-      require("../models/User").updateMany(
-        { role: "party", ownerId: userId, partyId },
-        { $set: { status: "disabled", disabledAt: new Date(), partyId: "", partyName: "Unknown (deleted)" } }
-      ),
+      PartyEdit.deleteMany({ userId, lotId: { $in: lotIds } }),
+      PartyLedger.deleteMany(partyFilter),
+      User.updateMany(userFilter, { $set: { status: "disabled", disabledAt: new Date(), partyId: "", partyName: "Unknown (deleted)" } }),
     ]).catch((err) => console.error("Party cascade cleanup error:", err));
+
+    for (const u of usersToDisable) {
+      invalidateAuthUserCache(u._id);
+    }
 
     res.json({ message: "Party deleted permanently" });
   } catch (error) {

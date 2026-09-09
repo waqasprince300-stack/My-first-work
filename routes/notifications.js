@@ -58,6 +58,7 @@ router.patch("/:id/read", async (req, res) => {
       return res.status(404).json({ message: "Notification not found" });
     }
     res.json(serialize(row));
+    emitOrgChange(req, "notification", { action: "notification_read", targetUserId: String(req.user._id) });
   } catch (error) {
     res
       .status(400)
@@ -73,6 +74,7 @@ router.post("/read-all", async (req, res) => {
       { $set: { readAt: new Date() } },
     );
     res.json({ updated: result.modifiedCount || 0 });
+    emitOrgChange(req, "notification", { action: "notification_read_all", targetUserId: String(req.user._id) });
   } catch (error) {
     res
       .status(400)

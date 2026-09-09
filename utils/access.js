@@ -86,10 +86,10 @@ const legacyMigrationDone = new Set();
 
 const ensureDefaultBusinessOwner = async (user) => {
   const userId = getDataOwnerId(user);
-  let owner = await BusinessOwner.findOne({ userId, isDefault: true }).lean();
+  let owner = await BusinessOwner.findOne({ userId, isDefault: true, deletedAt: null }).lean();
 
   if (!owner) {
-    owner = await BusinessOwner.findOne({ userId })
+    owner = await BusinessOwner.findOne({ userId, deletedAt: null })
       .sort({ createdAt: 1 })
       .lean();
   }
@@ -196,6 +196,7 @@ const resolveBusinessOwner = async (req, res, next) => {
           _id: requestedOwnerId,
           userId,
           status: "active",
+          deletedAt: null,
         }).lean();
         if (owner)
           setCached(
@@ -275,6 +276,7 @@ const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
           _id: requestedOwnerId,
           userId,
           status: "active",
+          deletedAt: null,
         }).lean();
         if (owner)
           setCached(

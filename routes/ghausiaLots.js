@@ -326,7 +326,17 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
 };
 
 const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
-  if (!lot.partyId || !lot.lotNumber) return;
+  const PartyEdit = require("../models/PartyEdit");
+  const lotIdStr = String(lot.id || lot._id || lot.lotNumber);
+
+  if (!lot.partyId || !lot.lotNumber) {
+    if (lotIdStr && lotIdStr !== "undefined") {
+      await PartyLedger.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
+      await PartyEdit.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
+    }
+    return;
+  }
+
   const synced = [
     "dispatched",
     "received back",
@@ -336,8 +346,6 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     "rejected",
   ];
   const ls = normalizeStatus(lot.status);
-  
-  const PartyEdit = require("../models/PartyEdit");
   
   if (!synced.includes(ls)) {
     // If status is changed to something like 'pending' that shouldn't be in the ledger,
@@ -383,12 +391,22 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   });
   
   if (existing) {
+    if (String(existing.partyId || "") !== String(entryData.partyId || "")) {
+      // The lot was reassigned to a DIFFERENT party.
+      // We must clear the old PartyEdit so the new party doesn't inherit the old party's bill/receipt/progress pictures!
+      await PartyEdit.deleteMany({ userId, businessOwnerId, lotId: String(entryData.lotId) });
+    }
+
     Object.assign(existing, entryData);
     await existing.save();
-    await PartyEdit.updateOne(
-      { userId, businessOwnerId, lotId: String(entryData.lotId) },
-      { $set: { overrideStatus: "" } }
-    );
+    
+    // Only clear overrideStatus if we didn't just delete the entire edit record
+    if (String(existing.partyId || "") === String(entryData.partyId || "")) {
+      await PartyEdit.updateOne(
+        { userId, businessOwnerId, lotId: String(entryData.lotId) },
+        { $set: { overrideStatus: "" } }
+      );
+    }
     return existing;
   }
 
@@ -1106,8 +1124,11 @@ router.patch("/:id", async (req, res) => {
       emitOrgChange(req, "lot", { lotId: String(newDupattaLot._id) });
     }
     if (dupattaToDelete && String(dupattaToDelete) !== String(existing._id)) {
-      await GhausiaLot.findByIdAndDelete(dupattaToDelete);
-      await PartyLedger.deleteMany({ lotId: String(dupattaToDelete) });
+      await GhausiaLot.findOneAndDelete({ _id: dupattaToDelete, userId });
+      await Promise.all([
+        PartyLedger.deleteMany({ lotId: String(dupattaToDelete), userId }),
+        PartyEdit.deleteMany({ lotId: String(dupattaToDelete), userId })
+      ]);
       emitOrgChange(req, "lot", { lotId: String(dupattaToDelete) });
     }
 
@@ -1175,9 +1196,10 @@ router.patch("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const userId = getDataOwnerId(req.user);
     const lot = await GhausiaLot.findOneAndDelete({
       _id: req.params.id,
-      userId: getDataOwnerId(req.user),
+      userId,
     });
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
@@ -1189,15 +1211,15 @@ router.delete("/:id", async (req, res) => {
     // Delete linked lot if it exists
     if (lot.linkedLotId) {
       if (!lot.suitComponent || lot.suitComponent === "main") {
-        await GhausiaLot.findByIdAndDelete(lot.linkedLotId);
+        await GhausiaLot.findOneAndDelete({ _id: lot.linkedLotId, userId });
         await Promise.all([
-          PartyLedger.deleteMany({ lotId: String(lot.linkedLotId) }),
-          PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }),
+          PartyLedger.deleteMany({ lotId: String(lot.linkedLotId), userId }),
+          PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId, businessOwnerId: req.businessOwnerId }),
         ]);
         emitOrgChange(req, "lot", { lotId: String(lot.linkedLotId) });
         deletedLinkedId = String(lot.linkedLotId);
       } else if (lot.suitComponent === "dupatta") {
-        updatedLinkedLot = await GhausiaLot.findByIdAndUpdate(lot.linkedLotId, {
+        updatedLinkedLot = await GhausiaLot.findOneAndUpdate({ _id: lot.linkedLotId, userId }, {
           suitType: "2-piece",
           linkedLotId: null,
           ownerBillingChoice: "separate"
@@ -1209,8 +1231,8 @@ router.delete("/:id", async (req, res) => {
     }
     
     await Promise.all([
-      PartyLedger.deleteMany({ lotId: String(lot._id) }),
-      PartyEdit.deleteMany({ lotId: String(lot._id), userId: getDataOwnerId(req.user), businessOwnerId: req.businessOwnerId }),
+      PartyLedger.deleteMany({ lotId: String(lot._id), userId }),
+      PartyEdit.deleteMany({ lotId: String(lot._id), userId, businessOwnerId: req.businessOwnerId }),
     ]);
     
     const responsePayload = { message: "Lot deleted successfully" };

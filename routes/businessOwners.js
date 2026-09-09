@@ -11,6 +11,7 @@ const RateCalculation = require("../models/RateCalculation");
 const SavedDesign = require("../models/SavedDesign");
 const User = require("../models/User");
 const { getDataOwnerId, requireAdminUser } = require("../utils/access");
+const { clearCache } = require("../utils/requestCache");
 
 const router = express.Router();
 
@@ -77,6 +78,7 @@ router.post("/", async (req, res) => {
       isDefault: false,
     });
 
+    clearCache("businessOwner");
     res.status(201).json(normalize(owner));
   } catch (error) {
     if (error.code === 11000) {
@@ -105,6 +107,7 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Business owner not found" });
     }
 
+    clearCache("businessOwner");
     res.json(normalize(owner));
   } catch (error) {
     res
@@ -131,6 +134,9 @@ router.delete("/:id", async (req, res) => {
     if (!owner) {
       return res.status(404).json({ message: "Business owner not found" });
     }
+    if (owner.deletedAt) {
+      return res.status(400).json({ message: "Workspace is already in trash" });
+    }
 
     // Soft delete
     const deletedSuffix = ` (Deleted ${Date.now()})`;
@@ -138,10 +144,22 @@ router.delete("/:id", async (req, res) => {
     owner.name = owner.name + deletedSuffix;
     await owner.save();
 
-    await require("../models/User").updateMany(
-      { role: "party", ownerId: uid, businessOwnerId: String(owner._id) },
-      { $set: { status: "disabled", disabledAt: new Date() } }
+    clearCache("businessOwner");
+
+    const User = require("../models/User");
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+
+    // Disable ONLY users who are currently approved or pending, so we don't overwrite genuinely disabled users.
+    const usersToDisable = await User.find({ role: "party", ownerId: uid, businessOwnerId: String(owner._id), status: { $in: ["approved", "pending"] } }).select("_id").lean();
+
+    await User.updateMany(
+      { _id: { $in: usersToDisable.map(u => u._id) } },
+      { $set: { status: "disabled", disabledAt: new Date(), disabledReason: "workspace_deleted" } }
     ).catch(err => console.error("Error disabling users on soft delete:", err));
+
+    for (const u of usersToDisable) {
+      invalidateAuthUserCache(u._id);
+    }
 
     return res.status(204).send();
   } catch (error) {
@@ -170,10 +188,22 @@ router.post("/:id/restore", async (req, res) => {
     owner.name = owner.name.replace(/ \(Deleted \d+\)$/, "");
     await owner.save();
 
-    await require("../models/User").updateMany(
-      { role: "party", ownerId: uid, businessOwnerId: String(owner._id), status: "disabled" },
-      { $set: { status: "approved", disabledAt: null } }
+    clearCache("businessOwner");
+
+    const User = require("../models/User");
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+
+    // Re-enable ONLY users who were disabled BECAUSE of the workspace deletion.
+    const usersToEnable = await User.find({ role: "party", ownerId: uid, businessOwnerId: String(owner._id), status: "disabled", disabledReason: "workspace_deleted" }).select("_id").lean();
+
+    await User.updateMany(
+      { _id: { $in: usersToEnable.map(u => u._id) } },
+      { $set: { status: "approved", disabledAt: null, disabledReason: "" } }
     ).catch(err => console.error("Error enabling users on restore:", err));
+
+    for (const u of usersToEnable) {
+      invalidateAuthUserCache(u._id);
+    }
 
     res.json(normalize(owner));
   } catch (error) {
@@ -274,16 +304,16 @@ router.delete("/:id/permanent", async (req, res) => {
       SavedDesign.deleteMany(workspaceFilter),
     ]);
 
+    const userFilter = { role: "party", ownerId: uid, businessOwnerId: String(bid) };
+    const usersToDisable = await User.find(userFilter).select("_id").lean();
+
     await User.updateMany(
-      {
-        role: "party",
-        ownerId: uid,
-        businessOwnerId: String(bid),
-      },
+      userFilter,
       {
         $set: {
           status: "disabled",
           disabledAt: new Date(),
+          disabledReason: "workspace_permanent_deleted",
           partyId: "",
           partyName: "",
           businessOwnerId: "",
@@ -291,7 +321,13 @@ router.delete("/:id/permanent", async (req, res) => {
       },
     );
 
+    const { invalidateAuthUserCache } = require("../middleware/auth");
+    for (const u of usersToDisable) {
+      invalidateAuthUserCache(u._id);
+    }
+
     await BusinessOwner.findByIdAndDelete(bid);
+    clearCache("businessOwner");
     return res.status(204).send();
   } catch (error) {
     res
