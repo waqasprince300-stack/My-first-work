@@ -112,7 +112,7 @@ router.patch("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const party = await Party.findOneAndUpdate(
-      { _id: req.params.id, userId: getDataOwnerId(req.user) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), deletedAt: null },
       stripOwnership(req.body),
       { new: true, runValidators: true },
     );
@@ -223,6 +223,7 @@ router.delete("/:id/permanent", async (req, res) => {
     const party = await Party.findOneAndDelete({
       _id: req.params.id,
       userId,
+      deletedAt: { $ne: null },
     });
     if (!party) {
       return res.status(404).json({ message: "Party not found" });

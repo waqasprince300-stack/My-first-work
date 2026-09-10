@@ -94,7 +94,7 @@ router.patch("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const owner = await BusinessOwner.findOneAndUpdate(
-      { _id: req.params.id, userId: getDataOwnerId(req.user) },
+      { _id: req.params.id, userId: getDataOwnerId(req.user), deletedAt: null },
       {
         name: String(req.body.name || "").trim(),
         phone: String(req.body.phone || "").trim(),
@@ -136,6 +136,9 @@ router.delete("/:id", async (req, res) => {
     }
     if (owner.deletedAt) {
       return res.status(400).json({ message: "Workspace is already in trash" });
+    }
+    if (owner.isDefault) {
+      return res.status(400).json({ message: "Cannot delete the default workspace. Set another workspace as default first." });
     }
 
     // Soft delete
@@ -229,6 +232,7 @@ router.delete("/:id/permanent", async (req, res) => {
     const owner = await BusinessOwner.findOne({
       _id: rawId,
       userId: uid,
+      deletedAt: { $ne: null },
     });
 
     if (!owner) {

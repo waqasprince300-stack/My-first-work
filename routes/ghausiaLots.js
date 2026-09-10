@@ -1197,24 +1197,30 @@ router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
     const userId = getDataOwnerId(req.user);
-    const lot = await GhausiaLot.findOneAndDelete({
-      _id: req.params.id,
-      userId,
-    });
+
+    // Bug #1 fix: scope delete by businessOwnerId so a lot from another workspace
+    // cannot accidentally be deleted if the IDs collide or are sent incorrectly.
+    const deleteQuery = { _id: req.params.id, userId };
+    if (req.businessOwnerId) deleteQuery.businessOwnerId = req.businessOwnerId;
+
+    const lot = await GhausiaLot.findOneAndDelete(deleteQuery);
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
     }
+
+    // Use the lot's own businessOwnerId for all cleanup queries (Bug #2 & #5 fix).
+    const lotBizId = String(lot.businessOwnerId || "");
     
     let deletedLinkedId = null;
     let updatedLinkedLot = null;
 
-    // Delete linked lot if it exists
+    // Delete / downgrade linked lot if it exists
     if (lot.linkedLotId) {
       if (!lot.suitComponent || lot.suitComponent === "main") {
         await GhausiaLot.findOneAndDelete({ _id: lot.linkedLotId, userId });
         await Promise.all([
-          PartyLedger.deleteMany({ lotId: String(lot.linkedLotId), userId }),
-          PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId, businessOwnerId: req.businessOwnerId }),
+          PartyLedger.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
+          PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
         ]);
         emitOrgChange(req, "lot", { lotId: String(lot.linkedLotId) });
         deletedLinkedId = String(lot.linkedLotId);
@@ -1228,11 +1234,27 @@ router.delete("/:id", async (req, res) => {
           emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
         }
       }
+    } else if (!lot.suitComponent || lot.suitComponent === "main") {
+      // Bug #3 fix: main lot has no linkedLotId, but a dupatta might point at it.
+      // Find and cascade-delete any orphan dupatta lot whose linkedLotId === this lot's _id.
+      const orphanDupatta = await GhausiaLot.findOneAndDelete({
+        linkedLotId: lot._id,
+        userId,
+        suitComponent: "dupatta",
+      });
+      if (orphanDupatta) {
+        await Promise.all([
+          PartyLedger.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
+          PartyEdit.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
+        ]);
+        emitOrgChange(req, "lot", { lotId: String(orphanDupatta._id) });
+        deletedLinkedId = String(orphanDupatta._id);
+      }
     }
     
     await Promise.all([
-      PartyLedger.deleteMany({ lotId: String(lot._id), userId }),
-      PartyEdit.deleteMany({ lotId: String(lot._id), userId, businessOwnerId: req.businessOwnerId }),
+      PartyLedger.deleteMany({ lotId: String(lot._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
+      PartyEdit.deleteMany({ lotId: String(lot._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
     ]);
     
     const responsePayload = { message: "Lot deleted successfully" };
