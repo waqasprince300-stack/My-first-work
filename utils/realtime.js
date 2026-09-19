@@ -15,6 +15,7 @@ const emitOrgChange = (req, type, extra = {}) => {
     if (!io || !req.user) return;
     const ownerId = getDataOwnerId(req.user);
     if (!ownerId) return;
+    clearCache("bootstrap");
     io.to(orgRoom(ownerId)).emit("data:changed", {
       type: type || "data",
       ownerId: String(ownerId),

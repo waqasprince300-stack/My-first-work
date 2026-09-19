@@ -1,12 +1,19 @@
 const DEFAULT_TTL_MS = 60_000;
 
 const caches = new Map();
+const cacheVersions = new Map();
 
 const getCache = (name) => {
   if (!caches.has(name)) {
     caches.set(name, new Map());
+    cacheVersions.set(name, 1);
   }
   return caches.get(name);
+};
+
+const getCacheVersion = (name) => {
+  if (!cacheVersions.has(name)) return 1;
+  return cacheVersions.get(name);
 };
 
 const getCached = (name, key) => {
@@ -20,7 +27,10 @@ const getCached = (name, key) => {
   return entry.value;
 };
 
-const setCached = (name, key, value, ttlMs = DEFAULT_TTL_MS) => {
+const setCached = (name, key, value, ttlMs = DEFAULT_TTL_MS, expectedVersion = null) => {
+  if (expectedVersion !== null && expectedVersion !== getCacheVersion(name)) {
+    return; // Cache was cleared during the fetch, do not poison it with stale data
+  }
   const store = getCache(name);
   store.set(String(key), {
     value,
@@ -35,6 +45,8 @@ const invalidateCached = (name, key) => {
 const clearCache = (name) => {
   if (caches.has(name)) {
     caches.get(name).clear();
+    const currentVersion = cacheVersions.get(name) || 1;
+    cacheVersions.set(name, currentVersion + 1);
   }
 };
 
@@ -53,4 +65,5 @@ module.exports = {
   setCached,
   invalidateCached,
   clearCache,
+  getCacheVersion,
 };

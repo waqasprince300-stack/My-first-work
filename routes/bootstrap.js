@@ -207,7 +207,7 @@ function partyBusinessOwnersFromLots(lotArrays, ownerNameMap) {
   }
   return [...seen.values()];
 }
-const { getCached, setCached } = require("../utils/requestCache");
+const { getCached, setCached, getCacheVersion } = require("../utils/requestCache");
 
 router.get("/", async (req, res) => {
   try {
@@ -217,16 +217,20 @@ router.get("/", async (req, res) => {
     const minimal =
       String(req.query.minimal || "").toLowerCase() === "1" ||
       req.query.minimal === "true";
+    const scopeOnly = String(req.query.scopeOnly || "").toLowerCase();
+    const isWorkspaceScopedOnly = scopeOnly === "workspace";
     
     // Cache key specific to user and payload shape
-    const cacheKey = `bootstrap:${req.user._id}:${minimal}:${includeReceipts}:${req.query.scope || ""}:${req.query.partyScope || ""}:${req.businessOwnerId || ""}`;
+    const cacheKey = `bootstrap:${req.user._id}:${minimal}:${includeReceipts}:${scopeOnly}:${req.query.scope || ""}:${req.query.partyScope || ""}:${req.businessOwnerId || ""}`;
     const cached = getCached("bootstrap", cacheKey);
     if (cached) return res.json(cached);
+
+    const expectedVersion = getCacheVersion("bootstrap");
 
     // Intercept res.json to cache the heavy response for 3 seconds
     const originalJson = res.json;
     res.json = function (body) {
-      setCached("bootstrap", cacheKey, body, 3000);
+      setCached("bootstrap", cacheKey, body, 5000, expectedVersion);
       return originalJson.call(this, body);
     };
 
@@ -269,6 +273,34 @@ router.get("/", async (req, res) => {
             payments: reportingPayments,
             partyEdits: reportingPartyEdits,
           },
+        });
+      }
+
+      // When scopeOnly=workspace, skip the 3 expensive reporting (scope=all) queries.
+      // The client already has reporting data cached and will refresh it in the background.
+      if (isWorkspaceScopedOnly) {
+        const [parties, ghausiaLots, payments, partyEdits] =
+          await Promise.all([
+            Party.find({ userId }).sort({ name: 1 }).lean(),
+            fetchGhausiaLots(
+              req,
+              { scopeAll: false, partyScopeAll: false },
+              ownerNameMap,
+            ),
+            fetchPayments(req, { scopeAll: false, partyScopeAll: false }),
+            fetchPartyEdits(
+              req,
+              { scopeAll: false, partyScopeAll: false },
+              receiptSelect,
+            ),
+          ]);
+
+        return res.json({
+          businessOwners: businessOwners.map(mapOwner),
+          parties,
+          ghausiaLots,
+          payments,
+          partyEdits,
         });
       }
 
