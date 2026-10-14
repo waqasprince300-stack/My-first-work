@@ -11,6 +11,6 @@ yarn-error.log*
 *.swp
 *.swo
 
-*_upload.zip
+*.zip
 
 email_test.js

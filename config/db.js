@@ -183,8 +183,8 @@ const connectDB = async () => {
     }
 
     console.error("❌ MongoDB connection failed:", msg);
-    if (process.env.NODE_ENV === "development") {
-      console.warn("⚠️ Local MongoDB not found. Starting in-memory MongoDB (MongoMemoryServer)...");
+    if (process.env.USE_MEMORY_DB === "true") {
+      console.warn("⚠️ Starting in-memory MongoDB (MongoMemoryServer)...");
       try {
         const { MongoMemoryServer } = require("mongodb-memory-server");
         const mongoServer = await MongoMemoryServer.create();

@@ -2,6 +2,7 @@ const express = require("express");
 const PersonalKhata = require("../models/PersonalKhata");
 const authenticate = require("../middleware/auth");
 const { requireApproved } = require("../middleware/auth");
+const { emitOrgChange } = require("../utils/realtime");
 
 const router = express.Router();
 
@@ -92,6 +93,8 @@ router.put("/", authenticate, requireApproved, async (req, res) => {
         setDefaultsOnInsert: true,
       },
     );
+
+    emitOrgChange(req, "personal_khata", { targetUserId: String(req.user._id) });
 
     res.json(toResponse(doc));
   } catch (error) {
