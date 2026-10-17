@@ -198,6 +198,7 @@ const STATUS_VALUES = [
 ];
 const createLotSchema = Joi.object({
   lotNumber: Joi.string().trim().allow("", null).optional(),
+  lotNo: Joi.string().trim().allow("", null).optional(),
   designNo: Joi.string().allow("", null),
   description: Joi.string().allow("", null),
   itemType: Joi.string().allow("", null),
@@ -223,7 +224,8 @@ const createLotSchema = Joi.object({
 });
 
 const updateLotSchema = Joi.object({
-  lotNumber: Joi.string().trim().optional(),
+  lotNumber: Joi.string().trim().allow("", null).optional(),
+  lotNo: Joi.string().trim().allow("", null).optional(),
   designNo: Joi.string().allow("", null).optional(),
   description: Joi.string().allow("", null).optional(),
   itemType: Joi.string().allow("", null).optional(),
@@ -271,9 +273,11 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
     );
   }
 
-  if (payload.lotNumber || payload.lotNo) {
-    normalized.lotNumber = payload.lotNumber || payload.lotNo;
-    normalized.lotNo = payload.lotNumber || payload.lotNo;
+  if (payload.lotNumber !== undefined || payload.lotNo !== undefined) {
+    const rawVal = payload.lotNumber !== undefined ? payload.lotNumber : payload.lotNo;
+    const val = rawVal == null ? "" : String(rawVal).trim();
+    normalized.lotNumber = val;
+    normalized.lotNo = val;
   }
 
   if (payload.fabric === "__custom") {
@@ -329,7 +333,7 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   const PartyEdit = require("../models/PartyEdit");
   const lotIdStr = String(lot.id || lot._id || lot.lotNumber);
 
-  if (!lot.partyId || !lot.lotNumber) {
+  if (!lot.partyId) {
     if (lotIdStr && lotIdStr !== "undefined") {
       await PartyLedger.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
       await PartyEdit.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
@@ -917,7 +921,11 @@ router.patch("/:id", async (req, res) => {
       };
       
       const baseLotNum = dupattaLotData.lotNumber || "";
-      const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
+      const formattedLotNum = !baseLotNum
+        ? ""
+        : baseLotNum.endsWith("-D")
+        ? baseLotNum
+        : baseLotNum + "-D";
       dupattaLotData.lotNumber = formattedLotNum;
       dupattaLotData.lotNo = formattedLotNum;
       
@@ -951,7 +959,11 @@ router.patch("/:id", async (req, res) => {
       const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
       
       const checkBaseLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
-      const finalCheckLotNumber = (checkBaseLotNumber || "").endsWith("-D") ? checkBaseLotNumber : checkBaseLotNumber + "-D";
+      const finalCheckLotNumber = !checkBaseLotNumber
+        ? ""
+        : (checkBaseLotNumber || "").endsWith("-D")
+        ? checkBaseLotNumber
+        : checkBaseLotNumber + "-D";
 
       let existingDupatta = await GhausiaLot.findOne({
         userId,
@@ -1029,11 +1041,15 @@ router.patch("/:id", async (req, res) => {
         dupattaUpdateData.totalAmount = dupattaUpdateData.billAmount;
       }
 
-      if (payload.lotNumber) {
-         const baseLotNum = payload.lotNumber;
-         const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
-         dupattaUpdateData.lotNumber = formattedLotNum;
-         dupattaUpdateData.lotNo = formattedLotNum;
+      if (payload.lotNumber !== undefined) {
+        const baseLotNum = payload.lotNumber || "";
+        const formattedLotNum = !baseLotNum
+          ? ""
+          : baseLotNum.endsWith("-D")
+          ? baseLotNum
+          : baseLotNum + "-D";
+        dupattaUpdateData.lotNumber = formattedLotNum;
+        dupattaUpdateData.lotNo = formattedLotNum;
       }
       
       if (payload.isRework !== undefined) {
@@ -1058,18 +1074,24 @@ router.patch("/:id", async (req, res) => {
       }
       
       if (payload.lotNumber !== undefined || payload.isRework !== undefined) {
-         const rawLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
-         const checkLotNumber = (rawLotNumber || "").endsWith("-D") ? rawLotNumber : rawLotNumber + "-D";
-         const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
-         
-         await ensureLotNumberUniqueInCollection(
-           userId,
-           existing.businessOwnerId,
-           checkLotNumber,
-           existing.linkedLotId,
-           "dupatta",
-           checkIsRework
-         );
+        const rawLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
+        const checkLotNumber = !rawLotNumber
+          ? ""
+          : (rawLotNumber || "").endsWith("-D")
+          ? rawLotNumber
+          : rawLotNumber + "-D";
+        const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
+        
+        if (checkLotNumber) {
+          await ensureLotNumberUniqueInCollection(
+            userId,
+            existing.businessOwnerId,
+            checkLotNumber,
+            existing.linkedLotId,
+            "dupatta",
+            checkIsRework
+          );
+        }
       }
       
       updatedLinkedLot = await GhausiaLot.findByIdAndUpdate(existing.linkedLotId, dupattaUpdateData, { new: true });
