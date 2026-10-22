@@ -123,66 +123,81 @@ const connectDB = async () => {
   };
 
   const primaryIsSrv = primaryUri.startsWith("mongodb+srv");
+  const maxAttempts = 3;
+  let lastError = null;
 
-  try {
-    await tryUri(primaryUri, "primary");
-    wireEvents();
-    return mongoose.connection;
-  } catch (error) {
-    let msg = String(error.message || error);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      if (attempt > 1) {
+        console.log(`🔄 Retrying MongoDB connection (attempt ${attempt}/${maxAttempts})...`);
+      }
+      await tryUri(primaryUri, "primary");
+      wireEvents();
+      return mongoose.connection;
+    } catch (error) {
+      lastError = error;
+      let msg = String(error.message || error);
 
-    if (primaryIsSrv && fallbackUri && dnsFailure(msg)) {
-      console.warn("");
-      console.warn(
-        "⚠️  SRV/TXT DNS failed for MONGODB_URI — retrying with MONGODB_FALLBACK_URI...",
-      );
-      console.warn("");
-      try {
-        await tryUri(fallbackUri, "fallback");
-        wireEvents();
+      if (primaryIsSrv && fallbackUri && dnsFailure(msg)) {
+        console.warn("");
         console.warn(
-          "   Tip: you can set that URI as MONGODB_URI to skip the failed srv step.",
+          "⚠️  SRV/TXT DNS failed for MONGODB_URI — retrying with MONGODB_FALLBACK_URI...",
         );
-        return mongoose.connection;
-      } catch (err2) {
-        msg = String(err2.message || err2);
-        console.error("❌ MONGODB_FALLBACK_URI failed:", msg);
+        console.warn("");
+        try {
+          await tryUri(fallbackUri, "fallback");
+          wireEvents();
+          console.warn(
+            "   Tip: you can set that URI as MONGODB_URI to skip the failed srv step.",
+          );
+          return mongoose.connection;
+        } catch (err2) {
+          msg = String(err2.message || err2);
+          console.error("❌ MONGODB_FALLBACK_URI failed:", msg);
+        }
+      }
+
+      if (
+        primaryIsSrv &&
+        dnsFailure(msg) &&
+        process.env.MONGODB_DISABLE_DOH !== "1"
+      ) {
+        console.warn("");
+        console.warn(
+          "⚠️  Retrying via DNS-over-HTTPS (Cloudflare) — your PC DNS cannot resolve mongodb+srv.",
+        );
+        console.warn("");
+        try {
+          const standardUri = await resolveMongoSrvViaDoh(primaryUri);
+          await tryUri(standardUri, "DNS-over-HTTPS");
+          wireEvents();
+          console.warn(
+            "   Tip: PC DNS is unreliable for Atlas. In Atlas → Connect → Drivers, copy the standard",
+          );
+          console.warn(
+            "   mongodb://… string into .env as MONGODB_URI (or MONGODB_FALLBACK_URI) for a stable connection.",
+          );
+          console.warn(
+            "   Also Atlas → Network Access → Allow Access from Anywhere (0.0.0.0/0) or your current IP.",
+          );
+          return mongoose.connection;
+        } catch (errDoh) {
+          console.error(
+            "❌ DNS-over-HTTPS resolution/connection failed:",
+            errDoh.message || errDoh,
+          );
+        }
+      }
+
+      if (attempt < maxAttempts) {
+        console.warn(`⚠️ Connection attempt ${attempt} failed: ${msg}. Retrying in 2 seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
+  }
 
-    if (
-      primaryIsSrv &&
-      dnsFailure(msg) &&
-      process.env.MONGODB_DISABLE_DOH !== "1"
-    ) {
-      console.warn("");
-      console.warn(
-        "⚠️  Retrying via DNS-over-HTTPS (Cloudflare) — your PC DNS cannot resolve mongodb+srv.",
-      );
-      console.warn("");
-      try {
-        const standardUri = await resolveMongoSrvViaDoh(primaryUri);
-        await tryUri(standardUri, "DNS-over-HTTPS");
-        wireEvents();
-        console.warn(
-          "   Tip: PC DNS is unreliable for Atlas. In Atlas → Connect → Drivers, copy the standard",
-        );
-        console.warn(
-          "   mongodb://… string into .env as MONGODB_URI (or MONGODB_FALLBACK_URI) for a stable connection.",
-        );
-        console.warn(
-          "   Also Atlas → Network Access → Allow Access from Anywhere (0.0.0.0/0) or your current IP.",
-        );
-        return mongoose.connection;
-      } catch (errDoh) {
-        console.error(
-          "❌ DNS-over-HTTPS resolution/connection failed:",
-          errDoh.message || errDoh,
-        );
-      }
-    }
-
-    console.error("❌ MongoDB connection failed:", msg);
+  const msg = String(lastError?.message || lastError);
+  console.error("❌ MongoDB connection failed:", msg);
     if (process.env.USE_MEMORY_DB === "true") {
       console.warn("⚠️ Starting in-memory MongoDB (MongoMemoryServer)...");
       try {
@@ -210,7 +225,6 @@ const connectDB = async () => {
       console.error("");
     }
     process.exit(1);
-  }
 };
 
 module.exports = connectDB;

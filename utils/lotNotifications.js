@@ -474,6 +474,47 @@ async function notifyLotAssigned({ lot, ownerId }) {
   }
 }
 
+/** Admin dispatched a lot to a party - notify the party users immediately. */
+async function notifyLotDispatched({ lot, ownerId }) {
+  try {
+    const oid = String(ownerId || "").trim();
+    if (!oid || !lot) return;
+
+    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
+    if (!partyUsers.length) return;
+
+    const label = lotLabel(lot);
+    const lotId = String(lot._id || lot.id || "").trim();
+    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
+    const pieces = Number(lot.pieces != null && lot.pieces !== "" ? lot.pieces : (lot.quantity || 0));
+    const fabric = String(lot.itemType || lot.fabric || "").trim();
+    const details = [];
+    if (pieces > 0) details.push(`${pieces} pcs`);
+    if (fabric) details.push(fabric);
+    if (lot.suitComponent === "dupatta") details.push("Dupatta");
+    const detailsStr = details.length > 0 ? ` (${details.join(", ")})` : "";
+
+    const title = `New lot dispatched — ${label}`;
+    const body = `The business dispatched lot ${label}${detailsStr} to you. Open My Lots to view details and start work.`;
+
+    await Promise.all(
+      partyUsers.map((user) =>
+        createAndEmailNotification({
+          user,
+          ownerId: oid,
+          type: "lot_dispatched",
+          title,
+          body,
+          lot,
+          linkPath,
+        }),
+      ),
+    );
+  } catch (err) {
+    console.warn("[lotNotifications] notifyLotDispatched failed:", err?.message || err);
+  }
+}
+
 /** Admin approved a lot completion - notify the party users. */
 async function notifyLotApproved({ lot, ownerId }) {
   try {
@@ -660,6 +701,7 @@ module.exports = {
   notifyBillRevisionResolved,
   notifyPaymentRecorded,
   notifyLotAssigned,
+  notifyLotDispatched,
   notifyLotApproved,
   notifyLotUpdated,
   notifyLotDeleted,

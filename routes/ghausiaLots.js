@@ -21,6 +21,7 @@ const {
   notifyLotRejected,
   notifyLotPendingReview,
   notifyLotAssigned,
+  notifyLotDispatched,
   notifyLotApproved,
   notifyLotUpdated,
   notifyLotDeleted,
@@ -780,10 +781,43 @@ router.post("/", async (req, res) => {
     } else {
       res.status(201).json(savedMainLot);
     }
-    emitOrgChange(req, "lot", { lotId: String(savedMainLot._id), action: "lot_assigned", linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}` });
-    void notifyLotAssigned({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
+    const isMainDispatched = normalizeStatus(savedMainLot.status) === "dispatched" && Boolean(savedMainLot.partyId);
+    if (isMainDispatched) {
+      emitOrgChange(req, "lot", {
+        lotId: String(savedMainLot._id),
+        action: "lot_dispatched",
+        partyId: String(savedMainLot.partyId),
+        partyName: String(savedMainLot.partyName || ""),
+        linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
+      });
+      void notifyLotDispatched({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
+    } else if (savedMainLot.partyId) {
+      emitOrgChange(req, "lot", {
+        lotId: String(savedMainLot._id),
+        action: "lot_assigned",
+        partyId: String(savedMainLot.partyId),
+        partyName: String(savedMainLot.partyName || ""),
+        linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
+      });
+      void notifyLotAssigned({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
+    } else {
+      emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
+    }
+
     if (savedDupattaLot) {
-      void notifyLotAssigned({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
+      const isDupattaDispatched = normalizeStatus(savedDupattaLot.status) === "dispatched" && Boolean(savedDupattaLot.partyId);
+      if (isDupattaDispatched) {
+        emitOrgChange(req, "lot", {
+          lotId: String(savedDupattaLot._id),
+          action: "lot_dispatched",
+          partyId: String(savedDupattaLot.partyId),
+          partyName: String(savedDupattaLot.partyName || ""),
+          linkPath: `/party-ledger?lotId=${String(savedDupattaLot._id)}`,
+        });
+        void notifyLotDispatched({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
+      } else if (savedDupattaLot.partyId) {
+        void notifyLotAssigned({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
+      }
     }
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
@@ -1179,7 +1213,16 @@ router.patch("/:id", async (req, res) => {
       let linkPathStr = undefined;
       const oldPartyId = String(existing.partyId || "");
       const newPartyId = String(lotObj.partyId || "");
-      if (newPartyId && oldPartyId !== newPartyId) {
+      const oldStatus = normalizeStatus(existing.status);
+      const newStatus = normalizeStatus(lotObj.status);
+      const isNowDispatched = newStatus === "dispatched" && Boolean(newPartyId);
+      const wasDispatchedToSameParty = oldStatus === "dispatched" && oldPartyId === newPartyId;
+
+      if (isNowDispatched && !wasDispatchedToSameParty) {
+        actionName = "lot_dispatched";
+        linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
+        void notifyLotDispatched({ lot: lotObj, ownerId: userId });
+      } else if (newPartyId && oldPartyId !== newPartyId) {
         actionName = "lot_assigned";
         linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
         void notifyLotAssigned({ lot: lotObj, ownerId: userId });
@@ -1189,6 +1232,8 @@ router.patch("/:id", async (req, res) => {
       
       emitOrgChange(req, "lot", { 
         lotId: String(lot._id), 
+        partyId: newPartyId,
+        partyName: String(lotObj.partyName || ""),
         ...(actionName && { action: actionName }),
         ...(linkPathStr && { linkPath: linkPathStr })
       });
