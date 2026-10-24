@@ -799,7 +799,6 @@ router.post("/", async (req, res) => {
         partyName: String(savedMainLot.partyName || ""),
         linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
       });
-      void notifyLotAssigned({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
     } else {
       emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
     }
@@ -815,8 +814,6 @@ router.post("/", async (req, res) => {
           linkPath: `/party-ledger?lotId=${String(savedDupattaLot._id)}`,
         });
         void notifyLotDispatched({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
-      } else if (savedDupattaLot.partyId) {
-        void notifyLotAssigned({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
       }
     }
   } catch (error) {
@@ -1225,9 +1222,6 @@ router.patch("/:id", async (req, res) => {
       } else if (newPartyId && oldPartyId !== newPartyId) {
         actionName = "lot_assigned";
         linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
-        void notifyLotAssigned({ lot: lotObj, ownerId: userId });
-      } else if (!isParty(req.user)) {
-        void notifyLotUpdated({ lot: lotObj, ownerId: userId });
       }
       
       emitOrgChange(req, "lot", { 

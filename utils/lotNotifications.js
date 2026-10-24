@@ -14,24 +14,41 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 
 async function sendWebPush(userId, payload) {
-  if (!process.env.VAPID_PUBLIC_KEY) return;
+  if (!process.env.VAPID_PUBLIC_KEY) return false;
   try {
-    const user = await User.findById(userId).select("+pushSubscriptions").lean();
-    if (!user || !user.pushSubscriptions || !user.pushSubscriptions.length) return;
+    const user = await User.findById(userId).select("+pushSubscriptions");
+    if (!user || !user.pushSubscriptions || !user.pushSubscriptions.length) return false;
 
-    const pushPromises = user.pushSubscriptions.map(sub =>
-      webpush.sendNotification(sub, JSON.stringify(payload)).catch(err => {
+    let sentAny = false;
+    const expiredEndpoints = [];
+
+    const pushPromises = user.pushSubscriptions.map(async (sub) => {
+      try {
+        await webpush.sendNotification(sub, JSON.stringify(payload));
+        sentAny = true;
+      } catch (err) {
         if (err.statusCode === 404 || err.statusCode === 410) {
-          // Subscription expired or unsubscribed, should be removed from DB in production
           console.warn("[web-push] Subscription expired");
+          if (sub?.endpoint) expiredEndpoints.push(sub.endpoint);
         } else {
-          console.warn("[web-push] send error:", err);
+          console.warn("[web-push] send error:", err?.message || err);
         }
-      })
-    );
+      }
+    });
+
     await Promise.all(pushPromises);
+
+    if (expiredEndpoints.length > 0) {
+      user.pushSubscriptions = user.pushSubscriptions.filter(
+        (s) => !expiredEndpoints.includes(s?.endpoint)
+      );
+      await user.save().catch(() => {});
+    }
+
+    return sentAny;
   } catch (error) {
     console.warn("[web-push] general error:", error);
+    return false;
   }
 }
 
@@ -95,16 +112,18 @@ async function createAndEmailNotification({
 
   const fullUrl = `${frontendBaseUrl()}${linkPath.startsWith("/") ? linkPath : `/${linkPath}`}`;
 
-  // Send Web Push Notification
-  await sendWebPush(user._id, {
+  // Send Web Push Notification (Mobile / Desktop push)
+  const pushDelivered = await sendWebPush(user._id, {
     title,
     body,
     url: fullUrl,
     icon: "/seam-grace-logo.png",
   });
 
+  // 1 hi tareeqay se notification: agar mobile ya desktop push chali gayi hai to email na bhejein.
+  // Email sirf tabhi jaye agar push deliver na hui ho (e.g. user ne notification allow na ki ho ya subscription na ho).
   const email = String(user.email || "").trim();
-  if (email && !getMailConfigError()) {
+  if (!pushDelivered && email && !getMailConfigError()) {
     try {
       await sendLotNotificationEmail({
         to: email,
@@ -444,34 +463,9 @@ async function notifyPaymentRecorded({ payment, ownerId }) {
 }
 
 /** Admin assigned a new lot to a party - notify the party users. */
-async function notifyLotAssigned({ lot, ownerId }) {
-  try {
-    const oid = String(ownerId || "").trim();
-    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
-    if (!partyUsers.length) return;
-
-    const label = lotLabel(lot);
-    const lotId = String(lot._id || lot.id || "").trim();
-    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
-    const title = `New lot assigned — ${label}`;
-    const body = `The business assigned you a new lot ${label}. Open My Lots to view details.`;
-
-    await Promise.all(
-      partyUsers.map((user) =>
-        createAndEmailNotification({
-          user,
-          ownerId: oid,
-          type: "lot_assigned",
-          title,
-          body,
-          lot,
-          linkPath,
-        }),
-      ),
-    );
-  } catch (err) {
-    console.warn("[lotNotifications] notifyLotAssigned failed:", err?.message || err);
-  }
+async function notifyLotAssigned({ lot: _lot, ownerId: _ownerId }) {
+  // Suppressed as requested: Only dispatch notification should go to party
+  return;
 }
 
 /** Admin dispatched a lot to a party - notify the party users immediately. */
@@ -516,65 +510,15 @@ async function notifyLotDispatched({ lot, ownerId }) {
 }
 
 /** Admin approved a lot completion - notify the party users. */
-async function notifyLotApproved({ lot, ownerId }) {
-  try {
-    const oid = String(ownerId || "").trim();
-    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
-    if (!partyUsers.length) return;
-
-    const label = lotLabel(lot);
-    const lotId = String(lot._id || lot.id || "").trim();
-    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
-    const title = `Lot completion approved — ${label}`;
-    const body = `The business approved the completion of lot ${label}. The final bill is ₨${Number(lot.billAmount || 0).toLocaleString()}. Open My Lots to view.`;
-
-    await Promise.all(
-      partyUsers.map((user) =>
-        createAndEmailNotification({
-          user,
-          ownerId: oid,
-          type: "lot_approved",
-          title,
-          body,
-          lot,
-          linkPath,
-        }),
-      ),
-    );
-  } catch (err) {
-    console.warn("[lotNotifications] notifyLotApproved failed:", err?.message || err);
-  }
+async function notifyLotApproved({ lot: _lot, ownerId: _ownerId }) {
+  // Suppressed: Party user does not need notifications on lot completion
+  return;
 }
 
 /** Admin updated a lot - notify the party users. */
-async function notifyLotUpdated({ lot, ownerId }) {
-  try {
-    const oid = String(ownerId || "").trim();
-    const partyUsers = await findPartyUsersForLot({ lot, ownerId: oid });
-    if (!partyUsers.length) return;
-
-    const label = lotLabel(lot);
-    const lotId = String(lot._id || lot.id || "").trim();
-    const linkPath = `/party-ledger?lotId=${encodeURIComponent(lotId)}`;
-    const title = `Lot updated — ${label}`;
-    const body = `The business updated the details of lot ${label}. Open My Lots to view changes.`;
-
-    await Promise.all(
-      partyUsers.map((user) =>
-        createAndEmailNotification({
-          user,
-          ownerId: oid,
-          type: "lot_updated",
-          title,
-          body,
-          lot,
-          linkPath,
-        }),
-      ),
-    );
-  } catch (err) {
-    console.warn("[lotNotifications] notifyLotUpdated failed:", err?.message || err);
-  }
+async function notifyLotUpdated({ lot: _lot, ownerId: _ownerId }) {
+  // Suppressed as requested: Only dispatch notification should go to party for lots
+  return;
 }
 
 /** Admin deleted a lot - notify the party users. */
