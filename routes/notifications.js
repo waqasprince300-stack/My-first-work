@@ -58,7 +58,12 @@ router.patch("/:id/read", async (req, res) => {
       return res.status(404).json({ message: "Notification not found" });
     }
     res.json(serialize(row));
-    emitOrgChange(req, "notification", { action: "notification_read", targetUserId: String(req.user._id) });
+    emitOrgChange(req, "notification", {
+      action: "notification_read",
+      targetUserId: String(req.user._id),
+      notificationId: String(req.params.id),
+      lotId: row.lotId ? String(row.lotId) : "",
+    });
   } catch (error) {
     res
       .status(400)
@@ -82,6 +87,74 @@ router.post("/read-all", async (req, res) => {
         message: "Error marking notifications read",
         error: error.message,
       });
+  }
+});
+
+/** POST /notifications/read-by-context */
+router.post("/read-by-context", async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { category, type, types, lotId } = req.body || {};
+
+    const filter = { userId, readAt: null };
+
+    if (lotId) {
+      filter.lotId = String(lotId).trim();
+    }
+
+    if (category === "review_lots") {
+      filter.type = { $in: ["lot_pending_review"] };
+    } else if (category === "party_ledger") {
+      filter.type = {
+        $in: [
+          "lot_rejected",
+          "lot_approved",
+          "lot_dispatched",
+          "lot_assigned",
+          "lot_updated",
+          "lot_deleted",
+          "bill_revision_approved",
+          "bill_revision_rejected",
+        ],
+      };
+    } else if (category === "bill_revision") {
+      filter.type = { $in: ["bill_revision_request"] };
+    } else if (category === "payments") {
+      filter.type = {
+        $in: ["payment_recorded", "payment_updated", "payment_deleted"],
+      };
+    } else if (Array.isArray(types) && types.length > 0) {
+      filter.type = { $in: types };
+    } else if (type) {
+      filter.type = type;
+    }
+
+    if (!filter.lotId && !filter.type) {
+      return res.status(400).json({ message: "No context specified" });
+    }
+
+    const result = await Notification.updateMany(filter, {
+      $set: { readAt: new Date() },
+    });
+
+    if (result.modifiedCount > 0) {
+      emitOrgChange(req, "notification", {
+        action: "notifications_marked_read",
+        targetUserId: String(userId),
+        category,
+        lotId,
+        type,
+        types,
+        count: result.modifiedCount,
+      });
+    }
+
+    res.json({ updated: result.modifiedCount || 0 });
+  } catch (error) {
+    res.status(400).json({
+      message: "Error marking notifications read by context",
+      error: error.message,
+    });
   }
 });
 

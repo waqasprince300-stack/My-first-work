@@ -134,7 +134,7 @@ app.use(
 const jwt = require("jsonwebtoken");
 const User = require("./models/User");
 const { getDataOwnerId } = require("./utils/access");
-const { orgRoom } = require("./utils/realtime");
+const { orgRoom, userRoom } = require("./utils/realtime");
 
 const { getSocketJwtSecret } = require("./utils/jwt");
 io.use(async (socket, next) => {
@@ -150,6 +150,7 @@ io.use(async (socket, next) => {
       .lean();
     if (user && user.status === "approved") {
       socket.data.ownerId = String(getDataOwnerId(user) || "");
+      socket.data.userId = String(user._id);
     }
   } catch {
     /* ignore — connect without a room */
@@ -161,6 +162,9 @@ io.use(async (socket, next) => {
 io.on("connection", (socket) => {
   if (socket.data.ownerId) {
     socket.join(orgRoom(socket.data.ownerId));
+  }
+  if (socket.data.userId) {
+    socket.join(userRoom(socket.data.userId));
   }
 
   socket.on("disconnect", () => {

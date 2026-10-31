@@ -86,16 +86,29 @@ async function createAndEmailNotification({
 
   const lotId = String(lot?._id || lot?.id || "").trim();
   const since = new Date(Date.now() - DEDUPE_WINDOW_MS);
-  const existing = await Notification.findOne({
+
+  // If a notification for the same type & lot was created within the window (even if marked read), do not create duplicate
+  const existingRecent = await Notification.findOne({
+    userId: user._id,
+    type,
+    lotId,
+    createdAt: { $gte: since },
+  }).lean();
+
+  if (existingRecent) {
+    return existingRecent;
+  }
+
+  // If an unread notification already exists for this lot & type, do not create duplicate
+  const existingUnread = await Notification.findOne({
     userId: user._id,
     type,
     lotId,
     readAt: null,
-    createdAt: { $gte: since },
   }).lean();
 
-  if (existing) {
-    return existing;
+  if (existingUnread) {
+    return existingUnread;
   }
 
   const doc = await Notification.create({

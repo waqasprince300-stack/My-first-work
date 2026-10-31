@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const PartyEdit = require("../models/PartyEdit");
 const GhausiaLot = require("../models/GhausiaLot");
+const Notification = require("../models/Notification");
 const {
   getBusinessOwnerFilter,
   getDataOwnerId,
@@ -537,6 +538,19 @@ router.put("/lot/:lotId", async (req, res) => {
             toAmount: prevBillRev?.toAmount ?? bodyRev?.toAmount,
             note: bodyRev?.rejectionNote,
           });
+          void Notification.updateMany(
+            { lotId: String(lotId), type: "bill_revision_request", readAt: null },
+            { $set: { readAt: new Date() } }
+          ).then((r) => {
+            if (r?.modifiedCount > 0) {
+              emitOrgChange(req, "notification", {
+                action: "notifications_marked_read",
+                targetUserId: String(req.user._id),
+                lotId: String(lotId),
+                category: "bill_revision",
+              });
+            }
+          }).catch(() => {});
         }
       } else {
         emitOrgChange(req, "partyEdit", { lotId: String(lotId) });

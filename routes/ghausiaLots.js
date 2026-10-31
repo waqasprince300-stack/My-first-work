@@ -4,6 +4,7 @@ const GhausiaLot = require("../models/GhausiaLot");
 const Party = require("../models/Party");
 const PartyLedger = require("../models/PartyLedger");
 const PartyEdit = require("../models/PartyEdit");
+const Notification = require("../models/Notification");
 const {
   getDataOwnerId,
   getScopedFilter,
@@ -332,6 +333,7 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
 
 const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   const PartyEdit = require("../models/PartyEdit");
+const Notification = require("../models/Notification");
   const lotIdStr = String(lot.id || lot._id || lot.lotNumber);
 
   if (!lot.partyId) {
@@ -563,6 +565,19 @@ router.post("/:id/approve-completion", async (req, res) => {
     res.json(lot);
     emitOrgChange(req, "lot", { lotId: String(lot._id), action: "lot_approved", linkPath: `/party-ledger?lotId=${String(lot._id)}` });
     void notifyLotApproved({ lot: lot.toObject({ virtuals: true }), ownerId: userId });
+    void Notification.updateMany(
+      { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
+      { $set: { readAt: new Date() } }
+    ).then((r) => {
+      if (r?.modifiedCount > 0) {
+        emitOrgChange(req, "notification", {
+          action: "notifications_marked_read",
+          targetUserId: String(req.user._id),
+          lotId: String(lot._id),
+          category: "review_lots",
+        });
+      }
+    }).catch(() => {});
   } catch (error) {
     res
       .status(400)
@@ -633,6 +648,19 @@ router.post("/:id/reject-completion", async (req, res) => {
       linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
     });
     void notifyLotRejected({ lot: lotObj, note, ownerId: userId });
+    void Notification.updateMany(
+      { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
+      { $set: { readAt: new Date() } }
+    ).then((r) => {
+      if (r?.modifiedCount > 0) {
+        emitOrgChange(req, "notification", {
+          action: "notifications_marked_read",
+          targetUserId: String(req.user._id),
+          lotId: String(lot._id),
+          category: "review_lots",
+        });
+      }
+    }).catch(() => {});
   } catch (error) {
     res
       .status(400)
