@@ -165,27 +165,52 @@ router.post("/", async (req, res) => {
       console.warn("Could not mark lots as completed on bill save:", lotErr);
     }
 
-    // 2. Link included payments to this bill so they aren't double-deducted
+    // 2. Link included payments to this bill so they aren't double-deducted,
+    // and auto-create payment records in the main ledger for any manual cash entries entered on this bill
     try {
-      const payIds = (saved.paymentsReceived || [])
-        .map((p) => p.paymentId || p.id || p._id)
-        .filter((id) => id && String(id).length === 24);
-      if (payIds.length > 0) {
-        const objectPayIds = payIds.map((id) => {
+      const activePayments = saved.paymentsReceived || [];
+      let billPaymentsUpdated = false;
+
+      for (let i = 0; i < activePayments.length; i++) {
+        const p = activePayments[i];
+        const pid = String(p.paymentId || p.id || p._id || "").trim();
+        if (pid && pid.length === 24) {
           try {
-            return new mongoose.Types.ObjectId(id);
-          } catch (_) {
-            return id;
-          }
-        });
-        await Payment.updateMany(
-          { _id: { $in: objectPayIds }, userId },
-          {
-            $set: {
+            await Payment.updateOne(
+              { _id: new mongoose.Types.ObjectId(pid), userId },
+              {
+                $set: {
+                  ownerBillId: saved._id,
+                  billedInBillNo: saved.billNo,
+                },
+              }
+            );
+          } catch (_) {}
+        } else if (Number(p.amount || 0) > 0) {
+          try {
+            const newPayment = await Payment.create({
+              userId,
+              businessOwnerId: bizId,
+              type: "Received",
+              amount: Number(p.amount),
+              party: saved.ownerName || "Owner",
+              date: toDateOrNow(p.date || saved.date),
+              note: p.note ? `${p.note} (Bill #${saved.billNo})` : `Cash received on Bill #${saved.billNo}`,
               ownerBillId: saved._id,
               billedInBillNo: saved.billNo,
-            },
+            });
+            p.paymentId = String(newPayment._id);
+            billPaymentsUpdated = true;
+          } catch (createPayErr) {
+            console.warn("Could not auto-create payment for bill manual cash:", createPayErr.message);
           }
+        }
+      }
+
+      if (billPaymentsUpdated) {
+        await OwnerBill.updateOne(
+          { _id: saved._id },
+          { $set: { paymentsReceived: activePayments } }
         );
       }
     } catch (payErr) {
@@ -302,18 +327,49 @@ router.patch("/:id", async (req, res) => {
     // Sync payments if updated
     if (req.body.paymentsReceived && Array.isArray(req.body.paymentsReceived)) {
       try {
-        const activePayIds = req.body.paymentsReceived
-          .map((p) => p.paymentId || p.id || p._id)
-          .filter((id) => id && String(id).length === 24)
-          .map((id) => {
-            try {
-              return new mongoose.Types.ObjectId(id);
-            } catch (_) {
-              return id;
-            }
-          });
+        const incomingPayments = req.body.paymentsReceived;
+        const activePayIds = [];
+        let billPaymentsUpdated = false;
 
-        // Unlink removed payments
+        for (let i = 0; i < incomingPayments.length; i++) {
+          const p = incomingPayments[i];
+          const pid = String(p.paymentId || p.id || p._id || "").trim();
+          if (pid && pid.length === 24) {
+            try {
+              const objId = new mongoose.Types.ObjectId(pid);
+              activePayIds.push(objId);
+            } catch (_) {}
+          } else if (Number(p.amount || 0) > 0) {
+            try {
+              const newPayment = await Payment.create({
+                userId,
+                businessOwnerId: bill.businessOwnerId,
+                type: "Received",
+                amount: Number(p.amount),
+                party: bill.ownerName || "Owner",
+                date: toDateOrNow(p.date || bill.date),
+                note: p.note ? `${p.note} (Bill #${bill.billNo})` : `Cash received on Bill #${bill.billNo}`,
+                ownerBillId: bill._id,
+                billedInBillNo: bill.billNo,
+              });
+              p.paymentId = String(newPayment._id);
+              activePayIds.push(newPayment._id);
+              billPaymentsUpdated = true;
+            } catch (createPayErr) {
+              console.warn("Could not auto-create payment for bill manual cash on patch:", createPayErr.message);
+            }
+          }
+        }
+
+        // Delete manual payments created for this bill that were removed
+        await Payment.deleteMany({
+          userId,
+          ownerBillId: bill._id,
+          note: { $regex: new RegExp(`\\(Bill #${bill.billNo}\\)|Bill #${bill.billNo}`, 'i') },
+          _id: { $nin: activePayIds },
+        });
+
+        // Unlink other removed payments
         await Payment.updateMany(
           {
             userId,
@@ -341,6 +397,13 @@ router.patch("/:id", async (req, res) => {
                 billedInBillNo: bill.billNo,
               },
             }
+          );
+        }
+
+        if (billPaymentsUpdated) {
+          await OwnerBill.updateOne(
+            { _id: bill._id },
+            { $set: { paymentsReceived: incomingPayments } }
           );
         }
       } catch (paySyncErr) {
@@ -386,13 +449,18 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
 
-    // Clean up corresponding Tally payment if any
+    // Clean up corresponding Tally payment and manual cash payments created for this bill
     try {
       await Payment.deleteMany({
         userId,
         businessOwnerId: bill.businessOwnerId,
-        type: "Tally",
-        linkedLot: `Bill #${bill.billNo}`,
+        $or: [
+          { type: "Tally", linkedLot: `Bill #${bill.billNo}` },
+          {
+            ownerBillId: bill._id,
+            note: { $regex: new RegExp(`\\(Bill #${bill.billNo}\\)|Bill #${bill.billNo}`, 'i') },
+          },
+        ],
       });
     } catch (_) {}
 
