@@ -235,8 +235,13 @@ router.patch("/:id", async (req, res) => {
     const data = withReceiptFlag(
       await withPartyId(stripOwnership(req.body), userId),
     );
+    const filter = {
+      _id: req.params.id,
+      userId,
+      ...(req.businessOwnerId ? { businessOwnerId: req.businessOwnerId } : {}),
+    };
     const payment = await Payment.findOneAndUpdate(
-      { _id: req.params.id, userId, businessOwnerId: req.businessOwnerId },
+      filter,
       data,
       { new: true, runValidators: true },
     );
@@ -257,11 +262,12 @@ router.patch("/:id", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
-    const payment = await Payment.findOneAndDelete({
+    const filter = {
       _id: req.params.id,
       userId: getDataOwnerId(req.user),
-      businessOwnerId: req.businessOwnerId,
-    });
+      ...(req.businessOwnerId ? { businessOwnerId: req.businessOwnerId } : {}),
+    };
+    const payment = await Payment.findOneAndDelete(filter);
     if (!payment) {
       return res.status(404).json({ message: "Payment not found" });
     }

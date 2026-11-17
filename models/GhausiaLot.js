@@ -195,6 +195,22 @@ const ghausiaLotSchema = new mongoose.Schema(
       ref: "GhausiaLot",
       required: false,
     },
+    ownerBillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "OwnerBill",
+      required: false,
+      default: null,
+    },
+    billedInBillNo: {
+      type: Number,
+      default: null,
+      required: false,
+    },
+    billedInBookNo: {
+      type: Number,
+      default: null,
+      required: false,
+    },
   },
   {
     timestamps: true,

@@ -500,7 +500,7 @@ router.post("/:id/approve-completion", async (req, res) => {
     
     if (skipBillable) {
       lot.status = "completed";
-      lot.receivedBackDate = new Date();
+      if (!lot.receivedBackDate) lot.receivedBackDate = new Date();
     } else {
       lot.status = "received back";
     }
@@ -545,7 +545,7 @@ router.post("/:id/approve-completion", async (req, res) => {
       {
         $set: {
           overrideStatus: "Completed",
-          completeDate: lot.receivedBackDate || new Date(),
+          completeDate: peDoc?.completeDate || lot.receivedBackDate || new Date(),
         },
         $setOnInsert: {
           lotId: lotIdStr,
@@ -932,23 +932,20 @@ router.patch("/:id", async (req, res) => {
         });
       }
       if (next === "pending approval") {
-        if (cur === "rejected") {
-          return res.status(400).json({
-            message:
-              "This lot was rejected — switch it back to In Progress before submitting again.",
-          });
-        }
-        // Allow pending: ledger often shows In Progress while Ghausia row is still "pending" until dispatch is recorded.
-        const allowedPrev = ["pending", "dispatched", "in progress"];
+        // Allow pending, dispatched, in progress, or rejected (when party fixes issues and resubmits)
+        const allowedPrev = ["pending", "dispatched", "in progress", "rejected"];
         if (!allowedPrev.includes(cur)) {
           return res.status(400).json({
             message:
-              "You can submit for approval only when the lot is pending, dispatched, or in progress.",
+              "You can submit for approval only when the lot is pending, dispatched, in progress, or rejected.",
           });
         }
         if (cur !== "pending approval") {
           becamePendingApproval = true;
           payload.pendingReviewSubmittedAt = new Date();
+          if (cur === "rejected") {
+            payload.rejectionNote = "";
+          }
         }
       }
       if (next === "dispatched" && cur === "rejected") {

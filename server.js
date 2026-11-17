@@ -39,6 +39,7 @@ const businessOwnersRouter = require("./routes/businessOwners");
 const personalKhataRouter = require("./routes/personalKhata");
 const bootstrapRouter = require("./routes/bootstrap");
 const notificationsRouter = require("./routes/notifications");
+const ownerBillsRouter = require("./routes/ownerBills");
 
 const app = express();
 const server = http.createServer(app);
@@ -234,6 +235,13 @@ app.use(
   requireApproved,
   resolveBusinessOwner,
   paymentsRouter,
+);
+app.use(
+  "/api/ownerBills",
+  authenticate,
+  requireApproved,
+  resolveBusinessOwner,
+  ownerBillsRouter,
 );
 app.use(
   "/api/partyLedger",

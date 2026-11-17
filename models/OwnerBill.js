@@ -1,0 +1,124 @@
+const mongoose = require("mongoose");
+
+const ownerBillSchema = new mongoose.Schema(
+  {
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    businessOwnerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BusinessOwner",
+      required: true,
+      index: true,
+    },
+    bookNo: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+    billNo: {
+      type: Number,
+      required: true,
+      min: 1,
+    },
+    date: {
+      type: String, // YYYY-MM-DD
+      required: true,
+    },
+    ownerName: {
+      type: String,
+      default: "",
+    },
+    // Array of lot items included in this bill
+    lots: [
+      {
+        lotId: { type: String, default: "" },
+        lotNo: { type: String, default: "" },
+        designNo: { type: String, default: "" },
+        suitComponent: { type: String, default: "main" },
+        quantity: { type: Number, default: 0 },
+        rate: { type: Number, default: 0 },
+        amount: { type: Number, default: 0 },
+        note: { type: String, default: "" },
+      },
+    ],
+    currentBillTotal: {
+      type: Number,
+      default: 0,
+    },
+    // Unsettled previous bills included (e.g. Bill #71 = ₨1,642,416)
+    unpaidPreviousBills: [
+      {
+        billNo: { type: String, default: "" },
+        amount: { type: Number, default: 0 },
+        note: { type: String, default: "" },
+      },
+    ],
+    unpaidPreviousBillsTotal: {
+      type: Number,
+      default: 0,
+    },
+    // Sabqa Baqaya brought forward from last bill
+    sabqaBaqaya: {
+      type: Number,
+      default: 0,
+    },
+    grossTotal: {
+      type: Number,
+      default: 0,
+    },
+    // Online or cash payments received
+    paymentsReceived: [
+      {
+        paymentId: { type: String, default: "" },
+        date: { type: String, default: "" },
+        amount: { type: Number, default: 0 },
+        note: { type: String, default: "" },
+      },
+    ],
+    totalPaymentsReceived: {
+      type: Number,
+      default: 0,
+    },
+    subTotalAfterPayments: {
+      type: Number,
+      default: 0,
+    },
+    // Deductions / Katotiyan (Dhaga, Kapra cut, Discount, etc.)
+    deductions: [
+      {
+        title: { type: String, default: "" },
+        amount: { type: Number, default: 0 },
+      },
+    ],
+    totalDeductions: {
+      type: Number,
+      default: 0,
+    },
+    // Final Grand Total Baqaya remaining
+    grandTotalBaqaya: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+    status: {
+      type: String,
+      enum: ["draft", "finalized"],
+      default: "finalized",
+    },
+    notes: {
+      type: String,
+      default: "",
+    },
+  },
+  {
+    timestamps: true,
+  }
+);
+
+ownerBillSchema.index({ userId: 1, businessOwnerId: 1, bookNo: 1, billNo: 1 });
+
+module.exports = mongoose.model("OwnerBill", ownerBillSchema);
