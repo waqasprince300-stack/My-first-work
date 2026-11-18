@@ -172,6 +172,52 @@ router.post("/", async (req, res) => {
           }
         );
         console.log(`[OwnerBill] Marked ${updateRes.modifiedCount} lots as completed for Bill #${saved.billNo}`);
+
+        // Sync individual rate / billAmount onto GhausiaLot for any lot updated on this bill
+        for (const item of (saved.lots || [])) {
+          const itemRate = Number(item.rate || 0);
+          const itemAmount = Number(item.amount || 0);
+          if (itemRate <= 0 && itemAmount <= 0) continue;
+
+          const singleConds = [];
+          const singleId = item.lotId || item._id || item.id;
+          if (singleId && String(singleId).length === 24) {
+            try {
+              singleConds.push({ _id: new mongoose.Types.ObjectId(singleId) });
+            } catch (_) {}
+          }
+          const singleNo = String(item.lotNo || item.lotNumber || "").trim();
+          if (singleNo) {
+            singleConds.push({ lotNo: singleNo });
+            singleConds.push({ lotNumber: singleNo });
+          }
+          if (singleConds.length === 0) continue;
+
+          const rateUpdate = {};
+          if (itemRate > 0) rateUpdate.rate = itemRate;
+          if (itemAmount > 0) {
+            rateUpdate.billAmount = itemAmount;
+            rateUpdate.totalAmount = itemAmount;
+          }
+
+          await GhausiaLot.updateMany(
+            {
+              userId,
+              $and: [
+                { $or: singleConds },
+                {
+                  $or: [
+                    { businessOwnerId: bizId },
+                    { businessOwnerId: null },
+                    { businessOwnerId: { $exists: false } },
+                  ],
+                },
+              ],
+            },
+            { $set: rateUpdate }
+          );
+        }
+
         emitOrgChange(req, "lot", { action: "lots_billed" });
       }
     } catch (lotErr) {
@@ -287,13 +333,26 @@ router.patch("/:id", async (req, res) => {
           }
         });
 
+        const bizCond = {
+          $or: [
+            { businessOwnerId: bill.businessOwnerId },
+            { businessOwnerId: null },
+            { businessOwnerId: { $exists: false } },
+          ],
+        };
+
         // Revert any lot previously linked to this bill that was removed in edit
         await GhausiaLot.updateMany(
           {
             userId,
-            $or: [
-              { ownerBillId: bill._id },
-              { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
+            $and: [
+              bizCond,
+              {
+                $or: [
+                  { ownerBillId: bill._id },
+                  { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
+                ],
+              },
             ],
             _id: { $nin: objectActiveIds },
             ...(activeLotNos.length > 0
@@ -319,7 +378,13 @@ router.patch("/:id", async (req, res) => {
         }
         if (markConditions.length > 0) {
           await GhausiaLot.updateMany(
-            { userId, $or: markConditions },
+            {
+              userId,
+              $and: [
+                bizCond,
+                { $or: markConditions },
+              ],
+            },
             {
               $set: {
                 status: "completed",
@@ -330,6 +395,45 @@ router.patch("/:id", async (req, res) => {
               },
             }
           );
+
+          // Sync individual rate / billAmount onto GhausiaLot
+          for (const item of req.body.lots) {
+            const itemRate = Number(item.rate || 0);
+            const itemAmount = Number(item.amount || 0);
+            if (itemRate <= 0 && itemAmount <= 0) continue;
+
+            const singleConds = [];
+            const singleId = item.lotId || item._id || item.id;
+            if (singleId && String(singleId).length === 24) {
+              try {
+                singleConds.push({ _id: new mongoose.Types.ObjectId(singleId) });
+              } catch (_) {}
+            }
+            const singleNo = String(item.lotNo || item.lotNumber || "").trim();
+            if (singleNo) {
+              singleConds.push({ lotNo: singleNo });
+              singleConds.push({ lotNumber: singleNo });
+            }
+            if (singleConds.length === 0) continue;
+
+            const rateUpdate = {};
+            if (itemRate > 0) rateUpdate.rate = itemRate;
+            if (itemAmount > 0) {
+              rateUpdate.billAmount = itemAmount;
+              rateUpdate.totalAmount = itemAmount;
+            }
+
+            await GhausiaLot.updateMany(
+              {
+                userId,
+                $and: [
+                  bizCond,
+                  { $or: singleConds },
+                ],
+              },
+              { $set: rateUpdate }
+            );
+          }
         }
         emitOrgChange(req, "lot", { action: "lots_billed" });
       } catch (patchLotErr) {
@@ -501,10 +605,21 @@ router.delete("/:id", async (req, res) => {
       await GhausiaLot.updateMany(
         {
           userId,
-          $or: [
-            { ownerBillId: bill._id },
-            { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
-            { billedInBillNo: bill.billNo },
+          $and: [
+            {
+              $or: [
+                { businessOwnerId: bill.businessOwnerId },
+                { businessOwnerId: null },
+                { businessOwnerId: { $exists: false } },
+              ],
+            },
+            {
+              $or: [
+                { ownerBillId: bill._id },
+                { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
+                { billedInBillNo: bill.billNo },
+              ],
+            },
           ],
         },
         {
