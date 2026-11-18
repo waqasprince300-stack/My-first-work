@@ -52,7 +52,7 @@ router.get("/", async (req, res) => {
       nextDefaults.lastBillId = String(latest._id);
     }
 
-    // Collect all payment IDs that have already been settled in existing finalized bills
+    // Collect all payment IDs that have already been settled in existing finalized bills or legacy history
     const billedPaymentIds = new Set();
     bills.forEach((b) => {
       (b.paymentsReceived || []).forEach((p) => {
@@ -60,6 +60,19 @@ router.get("/", async (req, res) => {
         if (pid && pid.length === 24) billedPaymentIds.add(pid);
       });
     });
+
+    try {
+      const legacyPayments = await Payment.find({
+        userId,
+        ...(bizId ? { businessOwnerId: bizId } : {}),
+        $or: [
+          { isLegacySettled: true },
+          { billedInBillNo: { $in: ["legacy_settled", "historical"] } },
+        ],
+      }).select("_id");
+      legacyPayments.forEach((p) => billedPaymentIds.add(String(p._id)));
+    } catch (_) {}
+
     nextDefaults.billedPaymentIds = Array.from(billedPaymentIds);
 
     res.json({
