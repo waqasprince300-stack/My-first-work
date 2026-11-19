@@ -109,6 +109,20 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ message: "businessOwnerId is required" });
     }
 
+    const checkBookNo = Number(req.body.bookNo || 1);
+    const checkBillNo = Number(req.body.billNo || 1);
+    const existingBill = await OwnerBill.findOne({
+      userId,
+      businessOwnerId: bizId,
+      bookNo: checkBookNo,
+      billNo: checkBillNo,
+    });
+    if (existingBill) {
+      return res.status(409).json({
+        message: `Bill #${checkBillNo} (Book ${checkBookNo}) pehle se database mein mojood hai! Duplicate bill save nahi ho sakta.`,
+      });
+    }
+
     const payload = {
       ...req.body,
       userId,
@@ -295,7 +309,10 @@ router.post("/", async (req, res) => {
     }
 
     emitOrgChange(req, "owner_bill", { billId: String(saved._id), action: "owner_bill_created" });
-    res.status(201).json(normalize(saved));
+    const finalBill = billPaymentsUpdated
+      ? await OwnerBill.findById(saved._id)
+      : saved;
+    res.status(201).json(normalize(finalBill || saved));
   } catch (error) {
     res.status(400).json({ message: "Error creating owner bill", error: error.message });
   }
@@ -617,7 +634,6 @@ router.delete("/:id", async (req, res) => {
               $or: [
                 { ownerBillId: bill._id },
                 { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
-                { billedInBillNo: bill.billNo },
               ],
             },
           ],
