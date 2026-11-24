@@ -61,6 +61,19 @@ const paymentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    ownerBillId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "OwnerBill",
+      default: null,
+    },
+    billedInBillNo: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null,
+    },
+    isLegacySettled: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,

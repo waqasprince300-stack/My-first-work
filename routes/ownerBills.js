@@ -9,7 +9,7 @@ const {
   requireAdminUser,
 } = require("../utils/access");
 const { emitOrgChange } = require("../utils/realtime");
-const { toDateOrNull, toDateOrNow } = require("../utils/dateHelpers");
+const { toDateOrNull, toDateOrNow, toIsoDateString } = require("../utils/dateHelpers");
 
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
 
@@ -267,7 +267,7 @@ router.post("/", async (req, res) => {
               type: "Received",
               amount: Number(p.amount),
               party: saved.ownerName || "Owner",
-              date: toDateOrNow(p.date || saved.date),
+              date: toIsoDateString(p.date || saved.date) || toIsoDateString(new Date()),
               note: p.note ? `${p.note} (Bill #${saved.billNo})` : `Cash received on Bill #${saved.billNo}`,
               ownerBillId: saved._id,
               billedInBillNo: saved.billNo,
@@ -290,16 +290,56 @@ router.post("/", async (req, res) => {
       console.warn("Could not link payments on bill save:", payErr.message);
     }
 
-    // 3. Create a Tally marker payment so the ledger timeline reflects this finalized bill
+    // 3. Record each lot billed to Owner in the Payments ledger so it shows on the Payments page under "Bill to Owner"
+    try {
+      for (const item of (saved.lots || [])) {
+        const itemAmt = Number(item.amount || 0);
+        if (itemAmt <= 0) continue;
+        const itemLotNo = String(item.lotNo || item.lotNumber || '').trim();
+        if (!itemLotNo) continue;
+
+        const existingLotPayment = await Payment.findOne({
+          userId,
+          businessOwnerId: bizId,
+          type: "Paid",
+          party: "Owner",
+          linkedLot: itemLotNo,
+          ownerBillId: saved._id,
+        });
+
+        if (!existingLotPayment) {
+          await Payment.create({
+            userId,
+            businessOwnerId: bizId,
+            type: "Paid",
+            party: "Owner",
+            amount: itemAmt,
+            date: toIsoDateString(saved.date) || toIsoDateString(new Date()),
+            linkedLot: itemLotNo,
+            ownerBillId: saved._id,
+            billedInBillNo: saved.billNo,
+            note: item.note
+              ? `Lot ${itemLotNo} billed to owner (Bill #${saved.billNo}) — ${item.note}`
+              : `Lot ${itemLotNo} billed to owner (Bill #${saved.billNo}, Book ${saved.bookNo}) — Design: ${item.designNo || '—'}, Qty: ${item.quantity || 0}`,
+          });
+        }
+      }
+    } catch (lotPayErr) {
+      console.warn("Could not create lot payment records for bill:", lotPayErr.message);
+    }
+
+    // 4. Create a Tally marker payment so the ledger timeline reflects this finalized bill
     try {
       const tallyNote = `Bill Book ${saved.bookNo} - Bill #${saved.billNo} Finalized (Baqaya: Rs ${Number(saved.grandTotalBaqaya || 0).toLocaleString()})`;
       await Payment.create({
         userId,
         businessOwnerId: bizId,
         type: "Tally",
-        amount: 0,
+        amount: Number(saved.grandTotalBaqaya || 0),
         party: saved.ownerName || "Owner",
         date: saved.date,
+        ownerBillId: saved._id,
+        billedInBillNo: saved.billNo,
         note: tallyNote,
         linkedLot: `Bill #${saved.billNo}`,
       });
@@ -452,6 +492,47 @@ router.patch("/:id", async (req, res) => {
             );
           }
         }
+        // Sync lot payment records for Owner ledger
+        try {
+          for (const item of (bill.lots || [])) {
+            const itemAmt = Number(item.amount || 0);
+            if (itemAmt <= 0) continue;
+            const itemLotNo = String(item.lotNo || item.lotNumber || '').trim();
+            if (!itemLotNo) continue;
+
+            const existingLotPayment = await Payment.findOne({
+              userId,
+              businessOwnerId: bill.businessOwnerId,
+              type: "Paid",
+              party: "Owner",
+              linkedLot: itemLotNo,
+              ownerBillId: bill._id,
+            });
+
+            if (!existingLotPayment) {
+              await Payment.create({
+                userId,
+                businessOwnerId: bill.businessOwnerId,
+                type: "Paid",
+                party: "Owner",
+                amount: itemAmt,
+                date: toIsoDateString(bill.date) || toIsoDateString(new Date()),
+                linkedLot: itemLotNo,
+                ownerBillId: bill._id,
+                billedInBillNo: bill.billNo,
+                note: item.note
+                  ? `Lot ${itemLotNo} billed to owner (Bill #${bill.billNo}) — ${item.note}`
+                  : `Lot ${itemLotNo} billed to owner (Bill #${bill.billNo}, Book ${bill.bookNo}) — Design: ${item.designNo || '—'}, Qty: ${item.quantity || 0}`,
+              });
+            } else if (existingLotPayment.amount !== itemAmt) {
+              existingLotPayment.amount = itemAmt;
+              await existingLotPayment.save();
+            }
+          }
+        } catch (lotPayErr) {
+          console.warn("Could not sync lot payments on bill patch:", lotPayErr.message);
+        }
+
         emitOrgChange(req, "lot", { action: "lots_billed" });
       } catch (patchLotErr) {
         console.warn("Could not sync lots on bill patch:", patchLotErr.message);
@@ -481,7 +562,7 @@ router.patch("/:id", async (req, res) => {
                 type: "Received",
                 amount: Number(p.amount),
                 party: bill.ownerName || "Owner",
-                date: toDateOrNow(p.date || bill.date),
+                date: toIsoDateString(p.date || bill.date) || toIsoDateString(new Date()),
                 note: p.note ? `${p.note} (Bill #${bill.billNo})` : `Cash received on Bill #${bill.billNo}`,
                 ownerBillId: bill._id,
                 billedInBillNo: bill.billNo,
@@ -557,8 +638,11 @@ router.patch("/:id", async (req, res) => {
         },
         {
           $set: {
+            amount: Number(bill.grandTotalBaqaya || 0),
             party: bill.ownerName || "Owner",
             date: bill.date,
+            ownerBillId: bill._id,
+            billedInBillNo: bill.billNo,
             note: tallyNote,
           },
         }
@@ -590,10 +674,8 @@ router.delete("/:id", async (req, res) => {
         businessOwnerId: bill.businessOwnerId,
         $or: [
           { type: "Tally", linkedLot: `Bill #${bill.billNo}` },
-          {
-            ownerBillId: bill._id,
-            note: { $regex: new RegExp(`\\(Bill #${bill.billNo}\\)|Bill #${bill.billNo}`, 'i') },
-          },
+          { ownerBillId: bill._id },
+          { billedInBillNo: bill.billNo, party: "Owner" },
         ],
       });
     } catch (_) {}
