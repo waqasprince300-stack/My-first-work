@@ -10,10 +10,20 @@ const Collection = require("../models/Collection");
 const RateCalculation = require("../models/RateCalculation");
 const SavedDesign = require("../models/SavedDesign");
 const User = require("../models/User");
-const { getDataOwnerId, requireAdminUser } = require("../utils/access");
+const {
+  getDataOwnerId,
+  requireAdminUser,
+  validateObjectIdParam,
+} = require("../utils/access");
 const { clearCache } = require("../utils/requestCache");
 
 const router = express.Router();
+router.param("id", validateObjectIdParam);
+
+const clearWorkspaceCaches = () => {
+  clearCache("businessOwner");
+  clearCache("bootstrap");
+};
 
 const normalize = (doc) => ({ ...doc.toObject(), id: String(doc._id) });
 
@@ -78,7 +88,7 @@ router.post("/", async (req, res) => {
       isDefault: false,
     });
 
-    clearCache("businessOwner");
+    clearWorkspaceCaches();
     res.status(201).json(normalize(owner));
   } catch (error) {
     if (error.code === 11000) {
@@ -93,13 +103,26 @@ router.post("/", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const updates = {};
+    if (req.body.name !== undefined) {
+      const trimmedName = String(req.body.name || "").trim();
+      if (!trimmedName) {
+        return res.status(400).json({ message: "Business owner name cannot be empty" });
+      }
+      updates.name = trimmedName;
+    }
+    if (req.body.phone !== undefined) {
+      updates.phone = String(req.body.phone || "").trim();
+    }
+    if (req.body.address !== undefined) {
+      updates.address = String(req.body.address || "").trim();
+    }
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ message: "No fields provided to update" });
+    }
     const owner = await BusinessOwner.findOneAndUpdate(
       { _id: req.params.id, userId: getDataOwnerId(req.user), deletedAt: null },
-      {
-        name: String(req.body.name || "").trim(),
-        phone: String(req.body.phone || "").trim(),
-        address: String(req.body.address || "").trim(),
-      },
+      updates,
       { new: true, runValidators: true },
     );
 
@@ -107,9 +130,12 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Business owner not found" });
     }
 
-    clearCache("businessOwner");
+    clearWorkspaceCaches();
     res.json(normalize(owner));
   } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({ message: "Business owner already exists" });
+    }
     res
       .status(400)
       .json({ message: "Error updating business owner", error: error.message });
@@ -147,7 +173,7 @@ router.delete("/:id", async (req, res) => {
     owner.name = owner.name + deletedSuffix;
     await owner.save();
 
-    clearCache("businessOwner");
+    clearWorkspaceCaches();
 
     const User = require("../models/User");
     const { invalidateAuthUserCache } = require("../middleware/auth");
@@ -191,7 +217,7 @@ router.post("/:id/restore", async (req, res) => {
     owner.name = owner.name.replace(/ \(Deleted \d+\)$/, "");
     await owner.save();
 
-    clearCache("businessOwner");
+    clearWorkspaceCaches();
 
     const User = require("../models/User");
     const { invalidateAuthUserCache } = require("../middleware/auth");
@@ -331,7 +357,7 @@ router.delete("/:id/permanent", async (req, res) => {
     }
 
     await BusinessOwner.findByIdAndDelete(bid);
-    clearCache("businessOwner");
+    clearWorkspaceCaches();
     return res.status(204).send();
   } catch (error) {
     res

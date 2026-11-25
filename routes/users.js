@@ -5,17 +5,19 @@ const Party = require("../models/Party");
 const {
   resolveBusinessOwnerAllowMissing,
   isTenantAdmin,
+  validateObjectIdParam,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
 
 const router = express.Router();
+router.param("id", validateObjectIdParam);
 
 const normalizeUser = (user) => user.toJSON();
 
 
 const findAdminParty = async (adminId, partyId, businessOwnerId) => {
   if (!partyId) return null;
-  const party = await Party.findOne({ _id: partyId, userId: adminId });
+  const party = await Party.findOne({ _id: partyId, userId: adminId, deletedAt: null });
   if (!party) return null;
   const partyBiz =
     party.businessOwnerId != null ? String(party.businessOwnerId) : "";
@@ -399,6 +401,7 @@ router.patch(
             ? String(req.businessOwnerId)
             : user.businessOwnerId;
       await user.save({ validateBeforeSave: false });
+      invalidateAuthUserCache(user._id);
 
       res.json(normalizeUser(user));
     } catch (error) {

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const { parseDateValue } = require("../utils/dateHelpers");
 
 const paymentSchema = new mongoose.Schema(
   {
@@ -70,6 +71,14 @@ const paymentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: null,
     },
+    billedInBookNo: {
+      type: Number,
+      default: null,
+    },
+    isBillManualCash: {
+      type: Boolean,
+      default: false,
+    },
     isLegacySettled: {
       type: Boolean,
       default: false,
@@ -82,8 +91,8 @@ const paymentSchema = new mongoose.Schema(
 
 function syncDateObj(doc) {
   if (doc && typeof doc.date === "string" && doc.date.trim()) {
-    const parsed = new Date(doc.date);
-    if (!Number.isNaN(parsed.getTime())) {
+    const parsed = parseDateValue(doc.date);
+    if (parsed && !Number.isNaN(parsed.getTime())) {
       doc.dateObj = parsed;
     }
   }
@@ -99,8 +108,8 @@ paymentSchema.pre("findOneAndUpdate", function (next) {
   if (update && (update.date || update.$set?.date)) {
     const newDate = update.date || update.$set.date;
     if (typeof newDate === "string" && newDate.trim()) {
-      const parsed = new Date(newDate);
-      if (!Number.isNaN(parsed.getTime())) {
+      const parsed = parseDateValue(newDate);
+      if (parsed && !Number.isNaN(parsed.getTime())) {
         if (!update.$set) update.$set = {};
         update.$set.dateObj = parsed;
       }

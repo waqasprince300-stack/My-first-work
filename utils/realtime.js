@@ -27,14 +27,19 @@ const emitOrgChange = (req, type, extra = {}) => {
       ...extra,
     };
 
+    if (extra && extra.targetUserId) {
+      const targetId = String(extra.targetUserId);
+      io.to(userRoom(targetId)).emit("data:changed", payload);
+      if (senderUserId && senderUserId !== targetId) {
+        io.to(userRoom(senderUserId)).emit("data:changed", payload);
+      }
+      return;
+    }
     if (ownerId) {
       io.to(orgRoom(ownerId)).emit("data:changed", payload);
     }
     if (senderUserId) {
       io.to(userRoom(senderUserId)).emit("data:changed", payload);
-    }
-    if (extra && extra.targetUserId && String(extra.targetUserId) !== senderUserId) {
-      io.to(userRoom(String(extra.targetUserId))).emit("data:changed", payload);
     }
   } catch {
     /* best-effort only */

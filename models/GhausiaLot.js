@@ -248,5 +248,9 @@ mongoose.connection.once('open', async () => {
     const col = mongoose.connection.collection("ghausialots");
     await col.dropIndex("userId_1_businessOwnerId_1_lotNumber_1_partial_unique");
     console.log("Old partial index dropped successfully.");
-  } catch (e) {}
+  } catch (e) {
+    if (e && e.codeName !== "IndexNotFound" && e.code !== 27) {
+      console.warn("Notice dropping old lot index:", e.message || e);
+    }
+  }
 });

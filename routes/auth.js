@@ -4,6 +4,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Otp = require("../models/Otp");
 const authenticate = require("../middleware/auth");
+const { invalidateAuthUserCache } = authenticate;
 const {
   getMailConfigError,
   sendPasswordResetEmail,
@@ -50,6 +51,19 @@ const respondWithToken = async (
     token,
     user,
     ...extra,
+  });
+};
+
+const otpDeliveryFailedResponse = async (res, result) => {
+  if (result?.otp?._id) {
+    await Otp.deleteOne({ _id: result.otp._id }).catch(() => {});
+  }
+  return res.status(503).json({
+    message:
+      result?.channel === "sms"
+        ? "Verification SMS delivery is not configured on this server."
+        : "Verification email could not be sent right now. Check server mail configuration or contact support.",
+    code: "OTP_DELIVERY_FAILED",
   });
 };
 
@@ -368,11 +382,21 @@ const notApprovedResponse = (res, user) => {
 
 router.post("/login", authLimiter, async (req, res) => {
   try {
-    const email = req.body.email && req.body.email.trim().toLowerCase();
-    const phone = normalizePhone(req.body.phone);
-    const { password } = req.body;
-    const deviceId = String(req.body.deviceId || "").trim();
-    const deviceLabel = String(req.body.deviceLabel || "").trim();
+    const email =
+      typeof req.body?.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+    const phone = normalizePhone(
+      typeof req.body?.phone === "string" ? req.body.phone : "",
+    );
+    const password =
+      typeof req.body?.password === "string" ? req.body.password : "";
+    const deviceId =
+      typeof req.body?.deviceId === "string" ? req.body.deviceId.trim() : "";
+    const deviceLabel =
+      typeof req.body?.deviceLabel === "string"
+        ? req.body.deviceLabel.trim()
+        : "";
 
     if ((!email && !phone) || !password) {
       return res
@@ -431,11 +455,17 @@ router.post("/login", authLimiter, async (req, res) => {
         deviceId,
       });
 
+      if (!result.delivered && process.env.NODE_ENV === "production") {
+        return otpDeliveryFailedResponse(res, result);
+      }
+
       return res.status(200).json({
         otpRequired: true,
         otpId: result.otp._id,
         purpose: "login_device",
-        message: `For your security, enter the code we sent to your ${result.channel === "sms" ? "phone" : "email"} to confirm this new device.`,
+        message: result.delivered
+          ? `For your security, enter the code we sent to your ${result.channel === "sms" ? "phone" : "email"} to confirm this new device.`
+          : "Verification message could not be delivered via email in this environment. Use the development code shown below.",
         ...otpResponseFields(result),
       });
     } catch (otpErr) {
@@ -473,14 +503,22 @@ router.post("/login/verify-otp", otpLimiter, async (req, res) => {
     const check = checkOtp(otp, code);
     if (!check.ok) {
       if (check.reason === "mismatch") {
-        otp.attempts += 1;
-        await otp.save();
+        await Otp.updateOne(
+          { _id: otp._id, consumed: false },
+          { $inc: { attempts: 1 } },
+        );
       }
       return res.status(400).json({ message: otpErrorMessage(check.reason) });
     }
 
-    otp.consumed = true;
-    await otp.save();
+    const claimedOtp = await Otp.findOneAndUpdate(
+      { _id: otp._id, consumed: false, expiresAt: { $gt: new Date() } },
+      { $set: { consumed: true } },
+      { new: true },
+    );
+    if (!claimedOtp) {
+      return res.status(400).json({ message: otpErrorMessage("consumed") });
+    }
 
     const user = await User.findById(otp.userId).select("+knownDevices");
     if (!user) {
@@ -508,24 +546,36 @@ router.post("/login/resend-otp", otpLimiter, async (req, res) => {
     const channel = req.body.channel;
 
     const prev = await Otp.findById(otpId);
-    if (!prev || prev.purpose !== "login_device") {
+    if (!prev || prev.purpose !== "login_device" || prev.consumed) {
       return res
         .status(400)
         .json({ message: "Could not resend the code. Please sign in again." });
     }
 
-    if ((prev.resendCount || 0) >= OTP_MAX_RESENDS) {
+    const user = await User.findById(prev.userId).select("+knownDevices");
+    if (!user) {
+      return res.status(401).json({ message: "Account no longer exists" });
+    }
+    if (user.status !== "approved") {
+      return notApprovedResponse(res, user);
+    }
+
+    const claimedPrev = await Otp.findOneAndUpdate(
+      {
+        _id: prev._id,
+        consumed: false,
+        resendCount: { $lt: OTP_MAX_RESENDS },
+      },
+      { $inc: { resendCount: 1 } },
+      { new: true },
+    );
+    if (!claimedPrev) {
       return res
         .status(429)
         .json({
           message:
             "Too many code requests. Please wait a while and sign in again.",
         });
-    }
-
-    const user = await User.findById(prev.userId).select("+knownDevices");
-    if (!user) {
-      return res.status(401).json({ message: "Account no longer exists" });
     }
 
     const result = await createAndSendOtp({
@@ -535,12 +585,18 @@ router.post("/login/resend-otp", otpLimiter, async (req, res) => {
       deviceId: prev.deviceId,
     });
 
-    result.otp.resendCount = (prev.resendCount || 0) + 1;
+    if (!result.delivered && process.env.NODE_ENV === "production") {
+      return otpDeliveryFailedResponse(res, result);
+    }
+
+    result.otp.resendCount = claimedPrev.resendCount;
     await result.otp.save();
 
     return res.json({
       otpId: result.otp._id,
-      message: "A new code has been sent.",
+      message: result.delivered
+        ? "A new code has been sent."
+        : "Email delivery failed in dev mode — see testing code below.",
       ...otpResponseFields(result),
     });
   } catch (error) {
@@ -604,6 +660,10 @@ router.post("/password-reset/request", authLimiter, async (req, res) => {
         preferredChannel: channel || (phone ? "sms" : "email"),
       });
 
+      if (!result.delivered && process.env.NODE_ENV === "production") {
+        return otpDeliveryFailedResponse(res, result);
+      }
+
       return res.json({
         message: generic,
         otpId: result.otp._id,
@@ -611,11 +671,7 @@ router.post("/password-reset/request", authLimiter, async (req, res) => {
       });
     } catch (otpErr) {
       if (otpErr.code === "NO_OTP_DESTINATION") {
-        return res.status(400).json({
-          message:
-            "This account has no email or phone on file to send a code to. Contact support.",
-          code: "NO_OTP_DESTINATION",
-        });
+        return res.json({ message: generic });
       }
       throw otpErr;
     }
@@ -630,7 +686,8 @@ router.post("/password-reset/verify", otpLimiter, async (req, res) => {
   try {
     const otpId = String(req.body.otpId || "").trim();
     const code = String(req.body.code || "").trim();
-    const { password } = req.body;
+    const password =
+      typeof req.body?.password === "string" ? req.body.password : "";
     const deviceId = String(req.body.deviceId || "").trim();
 
     if (!otpId || !code) {
@@ -654,14 +711,22 @@ router.post("/password-reset/verify", otpLimiter, async (req, res) => {
     const check = checkOtp(otp, code);
     if (!check.ok) {
       if (check.reason === "mismatch") {
-        otp.attempts += 1;
-        await otp.save();
+        await Otp.updateOne(
+          { _id: otp._id, consumed: false },
+          { $inc: { attempts: 1 } },
+        );
       }
       return res.status(400).json({ message: otpErrorMessage(check.reason) });
     }
 
-    otp.consumed = true;
-    await otp.save();
+    const claimedOtp = await Otp.findOneAndUpdate(
+      { _id: otp._id, consumed: false, expiresAt: { $gt: new Date() } },
+      { $set: { consumed: true } },
+      { new: true },
+    );
+    if (!claimedOtp) {
+      return res.status(400).json({ message: otpErrorMessage("consumed") });
+    }
 
     const user = await User.findById(otp.userId).select(
       "+password +knownDevices",
@@ -674,6 +739,7 @@ router.post("/password-reset/verify", otpLimiter, async (req, res) => {
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
     await user.save();
+    invalidateAuthUserCache(user._id);
 
     if (user.status !== "approved") {
       const msg =
@@ -700,7 +766,7 @@ router.post("/password-reset/verify", otpLimiter, async (req, res) => {
  * Upgrade a Personal Khata account to a business administrator or party account.
  * The user id never changes, so the Personal Khata ledger stays linked.
  */
-router.post("/account/upgrade", authenticate, async (req, res) => {
+router.post("/account/upgrade", authenticate, otpLimiter, async (req, res) => {
   try {
     const user = await User.findById(req.user._id).select(
       "+password +knownDevices",
@@ -755,6 +821,7 @@ router.post("/account/upgrade", authenticate, async (req, res) => {
         user.role = "admin";
         user.status = "pending";
         await user.save({ validateBeforeSave: false });
+        invalidateAuthUserCache(user._id);
         return res.json({
           message:
             "Upgrade requested. A platform super administrator must approve your business administrator account before you can sign in. Your Personal Khata data is safe and stays linked to this account.",
@@ -768,6 +835,7 @@ router.post("/account/upgrade", authenticate, async (req, res) => {
       user.approvedBy = user._id;
       user.approvedAt = new Date();
       await user.save({ validateBeforeSave: false });
+      invalidateAuthUserCache(user._id);
       return respondWithToken(res, 200, user, {
         message:
           "Upgraded to business administrator. You are now signed in as an admin.",
@@ -868,10 +936,9 @@ router.post("/forgot-password", authLimiter, async (req, res) => {
     }
 
     if (!user.email) {
-      return res.status(400).json({
+      return res.json({
         message:
-          "This account has no email address on file. Password reset is only available for accounts registered with email. Register again with email or contact support.",
-        code: "NO_EMAIL_ON_ACCOUNT",
+          "If that account is registered, a reset link has been sent. Check your inbox and spam folder.",
       });
     }
 
@@ -933,9 +1000,10 @@ router.post("/forgot-password", authLimiter, async (req, res) => {
   }
 });
 
-router.patch("/reset-password/:token", async (req, res) => {
+router.patch("/reset-password/:token", otpLimiter, async (req, res) => {
   try {
-    const { password } = req.body;
+    const password =
+      typeof req.body?.password === "string" ? req.body.password : "";
 
     if (!password || password.length < 8) {
       return res
@@ -945,7 +1013,7 @@ router.patch("/reset-password/:token", async (req, res) => {
 
     const hashedToken = crypto
       .createHash("sha256")
-      .update(req.params.token)
+      .update(String(req.params.token || ""))
       .digest("hex");
 
     const user = await User.findOne({
@@ -963,6 +1031,7 @@ router.patch("/reset-password/:token", async (req, res) => {
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
     await user.save();
+    invalidateAuthUserCache(user._id);
 
     if (user.status !== "approved") {
       const msg =

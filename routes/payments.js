@@ -10,13 +10,24 @@ const {
   isParty,
   requireAdminUser,
   isTenantAdmin,
+  validateObjectIdParam,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
 const { emitOrgChange } = require("../utils/realtime");
 const { notifyPaymentRecorded, notifyPaymentUpdated, notifyPaymentDeleted } = require("../utils/lotNotifications");
 
+router.param("id", validateObjectIdParam);
+
 const normalize = (doc) => ({ ...doc.toObject(), id: doc._id.toString() });
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+const stripOwnership = ({
+  userId: _userId,
+  businessOwnerId: _businessOwnerId,
+  _id: _mongoId,
+  id: _id,
+  createdAt: _createdAt,
+  updatedAt: _updatedAt,
+  ...data
+}) => data;
 
 /** Keep hasReceipt in sync with the stored slip so list/bootstrap can flag rows without the blob. */
 const withReceiptFlag = (data) => {
@@ -60,12 +71,7 @@ router.get("/", async (req, res) => {
 
     let filter;
     if (isParty(req.user)) {
-      const partyMatch = partyAllBiz
-        ? getPartyPaymentOrConditions(req.user)
-        : [
-            { partyId: String(req.user.partyId || "") },
-            { party: req.user.partyName || "" },
-          ];
+      const partyMatch = getPartyPaymentOrConditions(req.user);
 
       filter = {
         ...getOwnerFilter(req),

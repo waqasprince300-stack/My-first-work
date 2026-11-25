@@ -32,12 +32,7 @@ const ghausiaLotsFilter = (req, { scopeAll, partyScopeAll }) => {
 
 const paymentsFilter = (req, { scopeAll, partyScopeAll }) => {
   if (isParty(req.user)) {
-    const partyMatch = partyScopeAll
-      ? getPartyPaymentOrConditions(req.user)
-      : [
-          { partyId: String(req.user.partyId || "") },
-          { party: req.user.partyName || "" },
-        ];
+    const partyMatch = getPartyPaymentOrConditions(req.user);
     return {
       ...getOwnerFilter(req),
       ...(partyScopeAll ? {} : getBusinessOwnerFilter(req)),
@@ -58,9 +53,11 @@ async function partyAllowedLotIds(req, partyScopeAll) {
       .lean();
     return lots.map((lot) => String(lot._id));
   }
+  const pid = String(req.user.partyId || "").trim();
+  if (!pid) return [];
   const lots = await GhausiaLot.find({
     userId: getDataOwnerId(req.user),
-    partyId: String(req.user.partyId || ""),
+    partyId: pid,
   })
     .select("_id")
     .lean();
@@ -227,10 +224,12 @@ router.get("/", async (req, res) => {
 
     const expectedVersion = getCacheVersion("bootstrap");
 
-    // Intercept res.json to cache the heavy response for 3 seconds
+    // Intercept res.json to cache only successful responses for 5 seconds
     const originalJson = res.json;
     res.json = function (body) {
-      setCached("bootstrap", cacheKey, body, 5000, expectedVersion);
+      if (res.statusCode >= 200 && res.statusCode < 300) {
+        setCached("bootstrap", cacheKey, body, 5000, expectedVersion);
+      }
       return originalJson.call(this, body);
     };
 
@@ -241,6 +240,7 @@ router.get("/", async (req, res) => {
       const businessOwners = await BusinessOwner.find({
         userId,
         status: "active",
+        deletedAt: null,
       })
         .sort({ isDefault: -1, createdAt: 1 })
         .lean();
@@ -251,7 +251,7 @@ router.get("/", async (req, res) => {
       if (minimal) {
         const [parties, reportingLots, reportingPayments, reportingPartyEdits] =
           await Promise.all([
-            Party.find({ userId }).sort({ name: 1 }).lean(),
+            Party.find({ userId, deletedAt: null }).sort({ name: 1 }).lean(),
             fetchGhausiaLots(
               req,
               { scopeAll: true, partyScopeAll: false },
@@ -281,7 +281,7 @@ router.get("/", async (req, res) => {
       if (isWorkspaceScopedOnly) {
         const [parties, ghausiaLots, payments, partyEdits] =
           await Promise.all([
-            Party.find({ userId }).sort({ name: 1 }).lean(),
+            Party.find({ userId, deletedAt: null }).sort({ name: 1 }).lean(),
             fetchGhausiaLots(
               req,
               { scopeAll: false, partyScopeAll: false },
@@ -362,6 +362,23 @@ router.get("/", async (req, res) => {
         tenantOwners.map((owner) => [String(owner._id), owner.name]),
       );
 
+      const mongoose = require("mongoose");
+      const { stripPrivateLotFieldsForParty } = require("../utils/access");
+      const validPartyObjId =
+        req.user.partyId &&
+        mongoose.Types.ObjectId.isValid(String(req.user.partyId).trim())
+          ? String(req.user.partyId).trim()
+          : null;
+      const partyDocPromise = validPartyObjId
+        ? Party.find({
+            userId: getDataOwnerId(req.user),
+            _id: validPartyObjId,
+            deletedAt: null,
+          })
+            .sort({ name: 1 })
+            .lean()
+        : Promise.resolve([]);
+
       if (minimal) {
         const [
           parties,
@@ -369,12 +386,7 @@ router.get("/", async (req, res) => {
           partyCrossPayments,
           partyCrossPartyEdits,
         ] = await Promise.all([
-          Party.find({
-            userId: getDataOwnerId(req.user),
-            _id: req.user.partyId,
-          })
-            .sort({ name: 1 })
-            .lean(),
+          partyDocPromise,
           fetchGhausiaLots(
             req,
             { scopeAll: false, partyScopeAll: true },
@@ -389,14 +401,15 @@ router.get("/", async (req, res) => {
           ),
         ]);
 
+        const safeCrossLots = partyCrossLots.map(stripPrivateLotFieldsForParty);
         return res.json({
           parties,
           businessOwners: partyBusinessOwnersFromLots(
-            [partyCrossLots],
+            [safeCrossLots],
             ownerNameMap,
           ),
           partyCross: {
-            lots: partyCrossLots,
+            lots: safeCrossLots,
             payments: partyCrossPayments,
             partyEdits: partyCrossPartyEdits,
           },
@@ -412,12 +425,7 @@ router.get("/", async (req, res) => {
         partyCrossPayments,
         partyCrossPartyEdits,
       ] = await Promise.all([
-        Party.find({
-          userId: getDataOwnerId(req.user),
-          _id: req.user.partyId,
-        })
-          .sort({ name: 1 })
-          .lean(),
+        partyDocPromise,
         fetchGhausiaLots(
           req,
           { scopeAll: false, partyScopeAll: false },
@@ -444,17 +452,19 @@ router.get("/", async (req, res) => {
         ),
       ]);
 
+      const safeWorkspaceLots = ghausiaLots.map(stripPrivateLotFieldsForParty);
+      const safeCrossLots = partyCrossLots.map(stripPrivateLotFieldsForParty);
       return res.json({
         parties,
         businessOwners: partyBusinessOwnersFromLots(
-          [partyCrossLots, ghausiaLots],
+          [safeCrossLots, safeWorkspaceLots],
           ownerNameMap,
         ),
-        ghausiaLots,
+        ghausiaLots: safeWorkspaceLots,
         payments,
         partyEdits,
         partyCross: {
-          lots: partyCrossLots,
+          lots: safeCrossLots,
           payments: partyCrossPayments,
           partyEdits: partyCrossPartyEdits,
         },

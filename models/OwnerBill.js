@@ -119,6 +119,9 @@ const ownerBillSchema = new mongoose.Schema(
   }
 );
 
-ownerBillSchema.index({ userId: 1, businessOwnerId: 1, bookNo: 1, billNo: 1 });
+ownerBillSchema.index(
+  { userId: 1, businessOwnerId: 1, bookNo: 1, billNo: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model("OwnerBill", ownerBillSchema);

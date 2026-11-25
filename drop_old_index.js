@@ -21,6 +21,9 @@ async function run() {
     await GhausiaLot.collection.dropIndex("userId_1_businessOwnerId_1_lotNumber_1_unique");
     console.log("Older index dropped successfully.");
   } catch (e) {
+    if (e && e.codeName !== "IndexNotFound" && e.code !== 27) {
+      console.error("Error dropping older index:", e);
+    }
   }
   
   await mongoose.disconnect();

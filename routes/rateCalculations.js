@@ -1,9 +1,23 @@
 const express = require("express");
 const router = express.Router();
 const RateCalculation = require("../models/RateCalculation");
-const { getDataOwnerId, requireAdminUser } = require("../utils/access");
+const {
+  getDataOwnerId,
+  requireAdminUser,
+  validateObjectIdParam,
+} = require("../utils/access");
 
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+router.param("id", validateObjectIdParam);
+
+const stripOwnership = ({
+  userId: _userId,
+  businessOwnerId: _businessOwnerId,
+  _id: _mongoId,
+  id: _id,
+  createdAt: _createdAt,
+  updatedAt: _updatedAt,
+  ...data
+}) => data;
 
 // Get all rate calculations
 router.get("/", async (req, res) => {

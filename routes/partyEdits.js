@@ -20,9 +20,21 @@ const {
   notifyBillRevisionResolved,
 } = require("../utils/lotNotifications");
 
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+const { validateObjectIdParam: _validateObjIdParam } = require("../utils/access");
+router.param("id", _validateObjIdParam);
+router.param("lotId", _validateObjIdParam);
 
-const PARTY_EDIT_PATCH_FIELDS = [
+const stripOwnership = ({
+  userId: _userId,
+  businessOwnerId: _businessOwnerId,
+  _id: _mongoId,
+  id: _id,
+  createdAt: _createdAt,
+  updatedAt: _updatedAt,
+  ...data
+}) => data;
+
+const PARTY_EDIT_PARTY_FIELDS = [
   "completeDate",
   "partyBillAmount",
   "receipt",
@@ -32,6 +44,10 @@ const PARTY_EDIT_PATCH_FIELDS = [
   "pendingRevision",
   "billRevisionRequest",
   "amountChangeNote",
+];
+
+const PARTY_EDIT_PATCH_FIELDS = [
+  ...PARTY_EDIT_PARTY_FIELDS,
   "allotDate",
 ];
 
@@ -124,9 +140,11 @@ async function assertLotImagesWithinColorLimit(req, lotId, lotImages) {
 
 const getAllowedPartyLotIds = async (req) => {
   if (!isParty(req.user)) return null;
+  const pid = String(req.user.partyId || "").trim();
+  if (!pid) return [];
   const lots = await GhausiaLot.find({
     userId: getDataOwnerId(req.user),
-    partyId: String(req.user.partyId || ""),
+    partyId: pid,
   })
     .select("_id")
     .lean();
@@ -345,14 +363,55 @@ router.patch("/:id", async (req, res) => {
       ...getBusinessOwnerFilter(req),
       ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
     };
-    const patch = pickPartyEditPatch(req.body);
-    if (Object.prototype.hasOwnProperty.call(patch, "lotImages")) {
-      const existing = await PartyEdit.findOne(accessFilter)
-        .select("lotId")
-        .lean();
+    const patch = isParty(req.user)
+      ? Object.fromEntries(
+          PARTY_EDIT_PARTY_FIELDS.filter((f) =>
+            Object.prototype.hasOwnProperty.call(req.body || {}, f),
+          ).map((f) => [f, req.body[f]]),
+        )
+      : pickPartyEditPatch(req.body);
+
+    const needsExisting =
+      isParty(req.user) ||
+      Object.prototype.hasOwnProperty.call(patch, "lotImages");
+    let existing = null;
+    if (needsExisting) {
+      existing = await PartyEdit.findOne(accessFilter).select("lotId").lean();
       if (!existing) {
         return res.status(404).json({ message: "Party edit not found" });
       }
+    }
+
+    if (isParty(req.user) && existing?.lotId) {
+      const targetLot = await GhausiaLot.findOne({
+        _id: existing.lotId,
+        userId: getDataOwnerId(req.user),
+      })
+        .select("status")
+        .lean();
+      const targetLotStatus = String(targetLot?.status || "")
+        .toLowerCase()
+        .trim();
+      if (targetLotStatus === "completed" || targetLotStatus === "received back") {
+        const lockedAttempt =
+          Object.prototype.hasOwnProperty.call(patch, "partyBillAmount") ||
+          Object.prototype.hasOwnProperty.call(patch, "overrideStatus") ||
+          Object.prototype.hasOwnProperty.call(patch, "amountChangeNote");
+        delete patch.partyBillAmount;
+        delete patch.overrideStatus;
+        delete patch.amountChangeNote;
+        delete patch.completeDate;
+        delete patch.pendingRevision;
+        if (lockedAttempt && Object.keys(patch).length === 0) {
+          return res.status(403).json({
+            message:
+              "Lot is already completed or received back. Request a bill revision instead of editing amount or status directly.",
+          });
+        }
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, "lotImages")) {
       const lotImagesError = await assertLotImagesWithinColorLimit(
         req,
         existing.lotId,
@@ -386,6 +445,7 @@ router.put("/lot/:lotId", async (req, res) => {
     const userId = getDataOwnerId(req.user);
     let businessOwnerId = req.businessOwnerId;
 
+    let targetLotStatus = "";
     if (isParty(req.user)) {
       const lot = await GhausiaLot.findOne(
         getPartyAccessibleLotFilter(req.user, { _id: lotId }),
@@ -396,6 +456,7 @@ router.put("/lot/:lotId", async (req, res) => {
           .json({ message: "Lot not found for this party" });
       }
       businessOwnerId = String(lot.businessOwnerId ?? "").trim();
+      targetLotStatus = String(lot.status || "").toLowerCase().trim();
     }
 
     if (Object.prototype.hasOwnProperty.call(req.body, "lotImages")) {
@@ -409,8 +470,37 @@ router.put("/lot/:lotId", async (req, res) => {
       }
     }
 
+    const picked = isParty(req.user)
+      ? Object.fromEntries(
+          PARTY_EDIT_PARTY_FIELDS.filter((f) =>
+            Object.prototype.hasOwnProperty.call(req.body || {}, f),
+          ).map((f) => [f, req.body[f]]),
+        )
+      : stripOwnership(req.body);
+
+    if (
+      isParty(req.user) &&
+      (targetLotStatus === "completed" || targetLotStatus === "received back")
+    ) {
+      const lockedAttempt =
+        Object.prototype.hasOwnProperty.call(picked, "partyBillAmount") ||
+        Object.prototype.hasOwnProperty.call(picked, "overrideStatus") ||
+        Object.prototype.hasOwnProperty.call(picked, "amountChangeNote");
+      delete picked.partyBillAmount;
+      delete picked.overrideStatus;
+      delete picked.amountChangeNote;
+      delete picked.completeDate;
+      delete picked.pendingRevision;
+      if (lockedAttempt && Object.keys(picked).length === 0) {
+        return res.status(403).json({
+          message:
+            "Lot is already completed or received back. Request a bill revision instead of editing amount or status directly.",
+        });
+      }
+    }
+
     const data = {
-      ...(isParty(req.user) ? pickPartyEditPatch(req.body) : stripOwnership(req.body)),
+      ...picked,
       lotId,
       userId,
       businessOwnerId,

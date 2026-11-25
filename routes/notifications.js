@@ -329,7 +329,9 @@ router.get("/all-party-motivation", async (req, res) => {
       return res.status(403).json({ message: "Admin only" });
     }
     const ownerId = getDataOwnerId(req.user);
-    const parties = await Party.find({ userId: ownerId }).select("name").lean();
+    const parties = await Party.find({ userId: ownerId, deletedAt: null })
+      .select("name")
+      .lean();
     const results = await calculateAllPartiesMotivation({ ownerId, parties });
     res.json(results);
   } catch (error) {

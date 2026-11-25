@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const Otp = require("../models/Otp");
 const { getMailConfigError, sendOtpEmail } = require("./email");
-const { getSmsConfigError, sendSms } = require("./sms");
+const { getSmsConfigError, isSmsDeliverable, sendSms } = require("./sms");
 
 const OTP_TTL_MINUTES = Number(process.env.OTP_EXPIRES_MINUTES) || 10;
 const OTP_MAX_ATTEMPTS = Number(process.env.OTP_MAX_ATTEMPTS) || 5;
@@ -39,16 +39,17 @@ const maskDestination = (channel, dest) =>
 const availableChannels = (user) => {
   const list = [];
   if (user.email) list.push("email");
-  if (user.phone) list.push("sms");
+  if (user.phone && (isSmsDeliverable() || !user.email)) list.push("sms");
   return list;
 };
 
-/** Pick the channel: honor a valid preference, else phone-only/email-only, else default email. */
+/** Pick the channel: honor configured SMS if requested, otherwise use email whenever available. */
 const resolveChannel = (user, preferred) => {
   const hasEmail = !!user.email;
   const hasPhone = !!user.phone;
+  const smsReady = isSmsDeliverable();
   const pref = String(preferred || "").toLowerCase();
-  if (pref === "sms" && hasPhone) return "sms";
+  if (pref === "sms" && hasPhone && (smsReady || !hasEmail)) return "sms";
   if (pref === "email" && hasEmail) return "email";
   if (hasEmail) return "email";
   if (hasPhone) return "sms";
@@ -125,22 +126,26 @@ const createAndSendOtp = async ({
   try {
     delivery = await deliverOtp({ user, channel, code, purpose });
   } catch (e) {
+    console.error(`[OTP] ${channel} delivery failed:`, e.message || e);
     delivery = { delivered: false, note: e.message };
   }
 
-  // Expose the code to the client only when it could NOT actually be delivered (so nobody is
-  // ever locked out before a gateway is connected). Once email/SMS delivers, the code is never
-  // returned — even in development. Set OTP_DEBUG_RETURN=1 to force-return it while testing.
+  // Expose the code to the client ONLY outside production when delivery did not succeed (or
+  // when OTP_DEBUG_RETURN is explicitly enabled in non-production testing). Production never
+  // echoes raw OTP codes in HTTP responses.
+  const isProd = process.env.NODE_ENV === "production";
   const debugReturn =
-    String(process.env.OTP_DEBUG_RETURN || "").toLowerCase() === "true" ||
-    process.env.OTP_DEBUG_RETURN === "1";
-  const exposeCode = !delivery.delivered || debugReturn;
+    !isProd &&
+    (String(process.env.OTP_DEBUG_RETURN || "").toLowerCase() === "true" ||
+      process.env.OTP_DEBUG_RETURN === "1");
+  const exposeCode = !isProd && (!delivery.delivered || debugReturn);
 
   return {
     otp,
     channel,
     channels: availableChannels(user),
     destinationMasked: maskDestination(channel, destination),
+    delivered: Boolean(delivery.delivered),
     devCode: exposeCode ? code : undefined,
     deliveryNote: delivery.note || "",
   };

@@ -9,8 +9,11 @@ const {
   getDataOwnerId,
   isParty,
   requireAdminUser,
+  validateObjectIdParam,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
+
+router.param("id", validateObjectIdParam);
 
 /** Ignore client-sent tenant fields; server sets userId and businessOwnerId. */
 const stripOwnership = ({ userId: _userId, businessOwnerId: _businessOwnerId, ...data }) => data;
@@ -18,6 +21,12 @@ const stripOwnership = ({ userId: _userId, businessOwnerId: _businessOwnerId, ..
 // Get all parties
 router.get("/", async (req, res) => {
   try {
+    if (isParty(req.user)) {
+      const pid = String(req.user.partyId || "").trim();
+      if (!pid || !require("mongoose").Types.ObjectId.isValid(pid)) {
+        return res.json([]);
+      }
+    }
     const filter = isParty(req.user)
       ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: null }
       : { userId: getDataOwnerId(req.user), deletedAt: null };
@@ -76,6 +85,7 @@ router.get("/:id", async (req, res) => {
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
     }
+    require("../utils/requestCache").clearCache("bootstrap");
     res.json(party);
   } catch (error) {
     res
@@ -99,6 +109,7 @@ router.post("/", async (req, res) => {
       ...(bizId ? { businessOwnerId: bizId } : { businessOwnerId: null }),
     });
     const savedParty = await party.save();
+    require("../utils/requestCache").clearCache("bootstrap");
     res.status(201).json(savedParty);
   } catch (error) {
     res
@@ -119,6 +130,7 @@ router.patch("/:id", async (req, res) => {
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
     }
+    require("../utils/requestCache").clearCache("bootstrap");
     res.json(party);
   } catch (error) {
     res
@@ -162,6 +174,7 @@ router.delete("/:id", async (req, res) => {
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
     }
+    require("../utils/requestCache").clearCache("bootstrap");
 
     res.json({ message: "Party moved to trash successfully", party });
   } catch (error) {
@@ -203,6 +216,7 @@ router.post("/:id/restore", async (req, res) => {
     for (const u of usersToEnable) {
       invalidateAuthUserCache(u._id);
     }
+    require("../utils/requestCache").clearCache("bootstrap");
 
     res.json({ message: "Party restored successfully", party });
   } catch (error) {
@@ -251,11 +265,12 @@ router.delete("/:id/permanent", async (req, res) => {
       PartyEdit.deleteMany({ userId, lotId: { $in: lotIds } }),
       PartyLedger.deleteMany(partyFilter),
       User.updateMany(userFilter, { $set: { status: "disabled", disabledAt: new Date(), partyId: "", partyName: "Unknown (deleted)" } }),
-    ]).catch((err) => console.error("Party cascade cleanup error:", err));
+    ]);
 
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
     }
+    require("../utils/requestCache").clearCache("bootstrap");
 
     res.json({ message: "Party deleted permanently" });
   } catch (error) {

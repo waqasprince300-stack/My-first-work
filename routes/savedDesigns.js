@@ -1,9 +1,23 @@
 const express = require("express");
 const router = express.Router();
 const SavedDesign = require("../models/SavedDesign");
-const { getDataOwnerId, requireAdminUser } = require("../utils/access");
+const {
+  getDataOwnerId,
+  requireAdminUser,
+  validateObjectIdParam,
+} = require("../utils/access");
 
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+router.param("id", validateObjectIdParam);
+
+const stripOwnership = ({
+  userId: _userId,
+  businessOwnerId: _businessOwnerId,
+  _id: _mongoId,
+  id: _id,
+  createdAt: _createdAt,
+  updatedAt: _updatedAt,
+  ...data
+}) => data;
 
 // Get all saved designs
 router.get("/", async (req, res) => {

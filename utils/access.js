@@ -62,7 +62,8 @@ const getPartyScopeFilter = (req) => {
     return {};
   }
 
-  return { partyId: String(req.user.partyId || "") };
+  const pid = String(req.user.partyId || "").trim();
+  return { partyId: pid || "__impossible_party__" };
 };
 
 const getScopedFilter = (req, extra = {}) => ({
@@ -176,6 +177,9 @@ const resolveBusinessOwner = async (req, res, next) => {
       const headerBiz = (req.headers["x-business-owner-id"] || "")
         .toString()
         .trim();
+      if (headerBiz && !mongoose.Types.ObjectId.isValid(headerBiz)) {
+        return res.status(400).json({ message: "Invalid business owner id" });
+      }
       req.businessOwnerId =
         headerBiz ||
         String(
@@ -189,11 +193,15 @@ const resolveBusinessOwner = async (req, res, next) => {
     let owner = null;
 
     if (requestedOwnerId) {
-      const cacheKey = `${userId}:${requestedOwnerId}`;
+      const cleanRequestedId = String(requestedOwnerId).trim();
+      if (!mongoose.Types.ObjectId.isValid(cleanRequestedId)) {
+        return res.status(400).json({ message: "Invalid business owner id" });
+      }
+      const cacheKey = `${userId}:${cleanRequestedId}`;
       owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
       if (!owner) {
         owner = await BusinessOwner.findOne({
-          _id: requestedOwnerId,
+          _id: cleanRequestedId,
           userId,
           status: "active",
           deletedAt: null,
@@ -256,6 +264,9 @@ const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
       const headerBiz = (req.headers["x-business-owner-id"] || "")
         .toString()
         .trim();
+      if (headerBiz && !mongoose.Types.ObjectId.isValid(headerBiz)) {
+        return res.status(400).json({ message: "Invalid business owner id" });
+      }
       req.businessOwnerId =
         headerBiz ||
         String(
@@ -269,11 +280,15 @@ const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
     let owner = null;
 
     if (requestedOwnerId) {
-      const cacheKey = `${userId}:${requestedOwnerId}`;
+      const cleanRequestedId = String(requestedOwnerId).trim();
+      if (!mongoose.Types.ObjectId.isValid(cleanRequestedId)) {
+        return res.status(400).json({ message: "Invalid business owner id" });
+      }
+      const cacheKey = `${userId}:${cleanRequestedId}`;
       owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
       if (!owner) {
         owner = await BusinessOwner.findOne({
-          _id: requestedOwnerId,
+          _id: cleanRequestedId,
           userId,
           status: "active",
           deletedAt: null,
@@ -331,6 +346,33 @@ const toObjectId = (value) => {
   return new mongoose.Types.ObjectId(value);
 };
 
+const validateObjectIdParam = (req, res, next, val) => {
+  if (!mongoose.Types.ObjectId.isValid(String(val || "").trim())) {
+    return res.status(400).json({ message: "Invalid id parameter" });
+  }
+  return next();
+};
+
+const PRIVATE_ADMIN_LOT_FIELDS = [
+  "billAmount",
+  "totalAmount",
+  "rate",
+  "ownerBillId",
+  "billedInBillNo",
+  "billedInBookNo",
+  "ownerBillingChoice",
+];
+
+const stripPrivateLotFieldsForParty = (doc) => {
+  if (!doc || typeof doc !== "object") return doc;
+  const plain =
+    typeof doc.toObject === "function" ? doc.toObject({ virtuals: true }) : { ...doc };
+  for (const field of PRIVATE_ADMIN_LOT_FIELDS) {
+    delete plain[field];
+  }
+  return plain;
+};
+
 module.exports = {
   getDataOwnerId,
   getBusinessOwnerFilter,
@@ -348,5 +390,7 @@ module.exports = {
   requireAdminUser,
   resolveBusinessOwner,
   resolveBusinessOwnerAllowMissing,
+  stripPrivateLotFieldsForParty,
   toObjectId,
+  validateObjectIdParam,
 };

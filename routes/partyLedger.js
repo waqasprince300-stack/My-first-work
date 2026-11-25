@@ -8,7 +8,15 @@ const {
   requireAdminUser,
 } = require("../utils/access");
 
-const stripOwnership = ({ userId: _userId, ...data }) => data;
+const stripOwnership = ({
+  userId: _userId,
+  businessOwnerId: _businessOwnerId,
+  _id: _mongoId,
+  id: _id,
+  createdAt: _createdAt,
+  updatedAt: _updatedAt,
+  ...data
+}) => data;
 
 // Get all ledger entries
 router.get("/", async (req, res) => {

@@ -62,8 +62,8 @@ router.get("/summary", async (req, res) => {
       : Party.countDocuments(
           String(req.query.scope || "").toLowerCase() === "all" &&
             isTenantAdmin(req.user)
-            ? { userId }
-            : getScopedFilter(req),
+            ? { userId, deletedAt: null }
+            : getScopedFilter(req, { deletedAt: null }),
         );
 
     const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds, totalParties] =
@@ -166,6 +166,8 @@ router.get("/summary", async (req, res) => {
       if (type === "Paid" && !isOwner) paidToNonOwnerParties += total;
     });
 
+    const isPartyUser = isParty(req.user);
+
     res.json({
       pipeline: {
         totalLots,
@@ -178,21 +180,22 @@ router.get("/summary", async (req, res) => {
         inProgress: byStatus["in progress"] || 0,
       },
       finance: {
-        totalLotValue,
-        billableTotal,
+        totalLotValue: isPartyUser ? 0 : totalLotValue,
+        billableTotal: isPartyUser ? 0 : billableTotal,
         billableCount,
-        completedTotal,
-        ownerIn,
+        completedTotal: isPartyUser ? 0 : completedTotal,
+        ownerIn: isPartyUser ? 0 : ownerIn,
         paidToParties: paidOut,
-        netOwnerVsParties: ownerIn - paidOut,
+        netOwnerVsParties: isPartyUser ? 0 : ownerIn - paidOut,
         partyPaidTotal,
-        receivedFromOwner,
+        receivedFromOwner: isPartyUser ? 0 : receivedFromOwner,
         receivedFromParties,
         paidToNonOwnerParties,
         paymentCount,
         partyReceivedTotal,
-        netBalance:
-          receivedFromOwner + receivedFromParties - paidToNonOwnerParties,
+        netBalance: isPartyUser
+          ? 0
+          : receivedFromOwner + receivedFromParties - paidToNonOwnerParties,
       },
       parties: {
         activeWithLots: activePartyIds.filter(Boolean).length,
