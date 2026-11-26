@@ -39,6 +39,28 @@ const partyEditSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    /** Voice note recorded by party user (base64 data URL, excluded from list/bootstrap queries). */
+    partyVoiceNote: {
+      type: String,
+      default: "",
+    },
+    partyVoiceNoteDuration: {
+      type: Number,
+      default: 0,
+    },
+    /** Written & voice note from admin (read-only for party users). */
+    adminNotes: {
+      type: String,
+      default: "",
+    },
+    adminVoiceNote: {
+      type: String,
+      default: "",
+    },
+    adminVoiceNoteDuration: {
+      type: Number,
+      default: 0,
+    },
     overrideStatus: {
       type: String,
       default: "",

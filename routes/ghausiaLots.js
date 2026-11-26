@@ -343,13 +343,47 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
   return normalized;
 };
 
+const clearPartyOwnedEditFields = async ({
+  userId,
+  businessOwnerId,
+  lotId,
+}) => {
+  const lotIdStr = String(lotId || "").trim();
+  if (!lotIdStr || lotIdStr === "undefined") return;
+  await PartyEdit.updateMany(
+    {
+      userId,
+      ...(businessOwnerId ? { businessOwnerId } : {}),
+      lotId: lotIdStr,
+    },
+    {
+      $set: {
+        notes: "",
+        partyVoiceNote: "",
+        partyVoiceNoteDuration: 0,
+        receipt: null,
+        lotImages: [],
+        partyBillAmount: null,
+        completeDate: null,
+        overrideStatus: "",
+      },
+      $unset: {
+        pendingRevision: "",
+        billRevisionRequest: "",
+        amountChangeNote: "",
+      },
+    },
+  );
+};
+
 const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   const lotIdStr = String(lot.id || lot._id || lot.lotNumber);
 
   if (!lot.partyId) {
     if (lotIdStr && lotIdStr !== "undefined") {
       await PartyLedger.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
-      await PartyEdit.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
+      // Scrub only party-owned submission fields so admin notes/voice instructions remain intact.
+      await clearPartyOwnedEditFields({ userId, businessOwnerId, lotId: lotIdStr });
     }
     return;
   }
@@ -366,7 +400,7 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   
   if (!synced.includes(ls)) {
     // If status is changed to something like 'pending' that shouldn't be in the ledger,
-    // remove the ledger entry and any party edits to keep things clean.
+    // remove the ledger entry and clear overrideStatus while preserving notes/media.
     await PartyLedger.deleteOne({
       userId,
       businessOwnerId,
@@ -408,17 +442,16 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
   });
   
   if (existing) {
-    if (String(existing.partyId || "") !== String(entryData.partyId || "")) {
-      // The lot was reassigned to a DIFFERENT party.
-      // We must clear the old PartyEdit so the new party doesn't inherit the old party's bill/receipt/progress pictures!
-      await PartyEdit.deleteMany({ userId, businessOwnerId, lotId: String(entryData.lotId) });
+    const reassigned = String(existing.partyId || "") !== String(entryData.partyId || "");
+    if (reassigned) {
+      // Clear party-owned submission fields (notes, voice, receipt, pictures, bill) without erasing admin notes.
+      await clearPartyOwnedEditFields({ userId, businessOwnerId, lotId: String(entryData.lotId) });
     }
 
     Object.assign(existing, entryData);
     await existing.save();
     
-    // Only clear overrideStatus if we didn't just delete the entire edit record
-    if (String(existing.partyId || "") === String(entryData.partyId || "")) {
+    if (!reassigned) {
       await PartyEdit.updateOne(
         { userId, businessOwnerId, lotId: String(entryData.lotId) },
         { $set: { overrideStatus: "" } }
@@ -526,11 +559,14 @@ router.post("/:id/approve-completion", async (req, res) => {
     lot.completionApprovedAt = new Date();
 
     const lotIdStr = String(lot._id);
-    const peDoc = await PartyEdit.findOne({
+    let peDoc = await PartyEdit.findOne({
       lotId: lotIdStr,
       userId,
       businessOwnerId: lot.businessOwnerId,
     });
+    if (!peDoc) {
+      peDoc = await PartyEdit.findOne({ lotId: lotIdStr, userId });
+    }
 
     const ownerBillingChoice = String(
       req.body?.ownerBillingChoice || "",
@@ -558,13 +594,16 @@ router.post("/:id/approve-completion", async (req, res) => {
     await lot.save();
 
     await PartyEdit.findOneAndUpdate(
-      {
-        lotId: lotIdStr,
-        userId,
-        businessOwnerId: lot.businessOwnerId,
-      },
+      peDoc
+        ? { _id: peDoc._id }
+        : {
+            lotId: lotIdStr,
+            userId,
+            businessOwnerId: lot.businessOwnerId,
+          },
       {
         $set: {
+          businessOwnerId: lot.businessOwnerId,
           overrideStatus: "Completed",
           completeDate: peDoc?.completeDate || lot.receivedBackDate || new Date(),
         },
@@ -583,8 +622,8 @@ router.post("/:id/approve-completion", async (req, res) => {
       userId,
       lot.businessOwnerId,
     );
-    res.json(lot);
     emitOrgChange(req, "lot", { lotId: String(lot._id), action: "lot_approved", linkPath: `/party-ledger?lotId=${String(lot._id)}` });
+    res.json(lot);
     void notifyLotApproved({ lot: lot.toObject({ virtuals: true }), ownerId: userId });
     void Notification.updateMany(
       { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
@@ -635,14 +674,29 @@ router.post("/:id/reject-completion", async (req, res) => {
     await lot.save();
 
     const lotIdStr = String(lot._id);
+    let existingRejPe = await PartyEdit.findOne({
+      lotId: lotIdStr,
+      userId,
+      businessOwnerId: lot.businessOwnerId,
+    })
+      .select("_id")
+      .lean();
+    if (!existingRejPe) {
+      existingRejPe = await PartyEdit.findOne({ lotId: lotIdStr, userId })
+        .select("_id")
+        .lean();
+    }
     await PartyEdit.findOneAndUpdate(
-      {
-        lotId: lotIdStr,
-        userId,
-        businessOwnerId: lot.businessOwnerId,
-      },
+      existingRejPe
+        ? { _id: existingRejPe._id }
+        : {
+            lotId: lotIdStr,
+            userId,
+            businessOwnerId: lot.businessOwnerId,
+          },
       {
         $set: {
+          businessOwnerId: lot.businessOwnerId,
           overrideStatus: "Rejected",
         },
         $setOnInsert: {
@@ -660,7 +714,6 @@ router.post("/:id/reject-completion", async (req, res) => {
       userId,
       lot.businessOwnerId,
     );
-    res.json(lot);
     const lotObj = lot.toObject({ virtuals: true });
     emitOrgChange(req, "lot", {
       lotId: String(lot._id),
@@ -668,6 +721,7 @@ router.post("/:id/reject-completion", async (req, res) => {
       partyId: String(lot.partyId || ""),
       linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
     });
+    res.json(lot);
     void notifyLotRejected({ lot: lotObj, note, ownerId: userId });
     void Notification.updateMany(
       { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
@@ -837,11 +891,6 @@ router.post("/", async (req, res) => {
       await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
     }
 
-    if (savedDupattaLot) {
-      res.status(201).json([savedMainLot, savedDupattaLot]);
-    } else {
-      res.status(201).json(savedMainLot);
-    }
     const isMainDispatched = normalizeStatus(savedMainLot.status) === "dispatched" && Boolean(savedMainLot.partyId);
     if (isMainDispatched) {
       emitOrgChange(req, "lot", {
@@ -851,7 +900,6 @@ router.post("/", async (req, res) => {
         partyName: String(savedMainLot.partyName || ""),
         linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
       });
-      void notifyLotDispatched({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
     } else if (savedMainLot.partyId) {
       emitOrgChange(req, "lot", {
         lotId: String(savedMainLot._id),
@@ -874,8 +922,20 @@ router.post("/", async (req, res) => {
           partyName: String(savedDupattaLot.partyName || ""),
           linkPath: `/party-ledger?lotId=${String(savedDupattaLot._id)}`,
         });
-        void notifyLotDispatched({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
       }
+    }
+
+    if (savedDupattaLot) {
+      res.status(201).json([savedMainLot, savedDupattaLot]);
+    } else {
+      res.status(201).json(savedMainLot);
+    }
+
+    if (isMainDispatched) {
+      void notifyLotDispatched({ lot: savedMainLot.toObject ? savedMainLot.toObject() : savedMainLot, ownerId: userId });
+    }
+    if (savedDupattaLot && normalizeStatus(savedDupattaLot.status) === "dispatched" && Boolean(savedDupattaLot.partyId)) {
+      void notifyLotDispatched({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
     }
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
@@ -945,6 +1005,7 @@ router.patch("/:id", async (req, res) => {
       }
       payload.businessOwnerId = moveTarget;
     }
+    const effectiveBizOwnerId = payload.businessOwnerId || existing.businessOwnerId;
 
     if (!isParty(req.user)) {
       const cur = normalizeStatus(existing.status);
@@ -979,13 +1040,24 @@ router.patch("/:id", async (req, res) => {
               "You cannot mark a lot billable directly. Submit for completion from your Party Ledger.",
           });
         }
+        if (next === "pending" && cur !== "pending") {
+          return res.status(403).json({
+            message: "Party users cannot revert a lot back to pending.",
+          });
+        }
         if (next === "pending approval") {
-          // Allow pending, dispatched, in progress, or rejected (when party fixes issues and resubmits)
-          const allowedPrev = ["pending", "dispatched", "in progress", "rejected"];
+          // Allow pending, dispatched, in progress, rejected, or pending approval (updating under review)
+          const allowedPrev = [
+            "pending",
+            "dispatched",
+            "in progress",
+            "rejected",
+            "pending approval",
+          ];
           if (!allowedPrev.includes(cur)) {
             return res.status(400).json({
               message:
-                "You can submit for approval only when the lot is pending, dispatched, in progress, or rejected.",
+                "You can submit for approval only when the lot is pending, dispatched, in progress, rejected, or pending approval.",
             });
           }
           if (cur !== "pending approval") {
@@ -1017,7 +1089,7 @@ router.patch("/:id", async (req, res) => {
         suitComponent: "dupatta", 
         suitType: "3-piece", 
         userId, 
-        businessOwnerId: existing.businessOwnerId,
+        businessOwnerId: effectiveBizOwnerId,
         status: "pending",
         dispatchDate: null,
         receivedBackDate: null,
@@ -1071,7 +1143,7 @@ router.patch("/:id", async (req, res) => {
 
       let existingDupatta = await GhausiaLot.findOne({
         userId,
-        businessOwnerId: existing.businessOwnerId,
+        businessOwnerId: effectiveBizOwnerId,
         $or: [{ lotNumber: new RegExp(`^${escapeRegexString(finalCheckLotNumber)}$`, "i") }, { lotNo: new RegExp(`^${escapeRegexString(finalCheckLotNumber)}$`, "i") }],
         suitComponent: "dupatta",
         isRework: Boolean(checkIsRework)
@@ -1096,13 +1168,13 @@ router.patch("/:id", async (req, res) => {
            existingDupatta.totalAmount = dupattaLotData.totalAmount;
          }
          await existingDupatta.save();
-         await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, existing.businessOwnerId);
+         await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
          emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
          updatedLinkedLot = existingDupatta;
       } else {
          await ensureLotNumberUniqueInCollection(
            userId,
-           existing.businessOwnerId,
+           effectiveBizOwnerId,
            finalCheckLotNumber,
            null,
            "dupatta",
@@ -1189,7 +1261,7 @@ router.patch("/:id", async (req, res) => {
         if (checkLotNumber) {
           await ensureLotNumberUniqueInCollection(
             userId,
-            existing.businessOwnerId,
+            effectiveBizOwnerId,
             checkLotNumber,
             existing.linkedLotId,
             "dupatta",
@@ -1204,7 +1276,7 @@ router.patch("/:id", async (req, res) => {
         { new: true },
       );
       if (updatedLinkedLot) {
-         await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, existing.businessOwnerId);
+         await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
          emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
       }
     } else if (existing.suitType === "3-piece" && payload.suitType !== undefined && payload.suitType !== "3-piece" && isMainComponent) {
@@ -1229,7 +1301,6 @@ router.patch("/:id", async (req, res) => {
     }
 
     const merged = { ...existing.toObject(), ...payload };
-    const effectiveBizOwnerId = payload.businessOwnerId || existing.businessOwnerId;
     await ensureLotNumberUniqueInCollection(
       userId,
       effectiveBizOwnerId,
@@ -1238,6 +1309,31 @@ router.patch("/:id", async (req, res) => {
       merged.suitComponent,
       merged.isRework,
     );
+    if (
+      moveTarget &&
+      payload.businessOwnerId === moveTarget &&
+      existing.linkedLotId &&
+      !dupattaToDelete
+    ) {
+      const linkedCheckDoc = await GhausiaLot.findOne({
+        _id: existing.linkedLotId,
+        userId,
+      }).lean();
+      if (linkedCheckDoc) {
+        await ensureLotNumberUniqueInCollection(
+          userId,
+          moveTarget,
+          canonicalLotNumberFromDoc(linkedCheckDoc),
+          linkedCheckDoc._id,
+          linkedCheckDoc.suitComponent,
+          linkedCheckDoc.isRework,
+        );
+      }
+    }
+
+    const partyChanged =
+      payload.partyId !== undefined &&
+      String(payload.partyId || "") !== String(existing.partyId || "");
 
     const lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
       new: true,
@@ -1245,6 +1341,13 @@ router.patch("/:id", async (req, res) => {
     });
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
+    }
+    if (partyChanged) {
+      await clearPartyOwnedEditFields({
+        userId,
+        businessOwnerId: existing.businessOwnerId,
+        lotId: String(lot._id),
+      });
     }
     await syncPartyLedgerForLot(
       lot.toObject({ virtuals: true }),
@@ -1255,7 +1358,7 @@ router.patch("/:id", async (req, res) => {
 
     if (newDupattaLot) {
       await newDupattaLot.save();
-      await syncPartyLedgerForLot(newDupattaLot, userId, existing.businessOwnerId);
+      await syncPartyLedgerForLot(newDupattaLot, userId, effectiveBizOwnerId);
       emitOrgChange(req, "lot", { lotId: String(newDupattaLot._id) });
     }
     if (dupattaToDelete && String(dupattaToDelete) !== String(existing._id)) {
@@ -1295,13 +1398,13 @@ router.patch("/:id", async (req, res) => {
       ]);
     }
 
+    let dispatchNotifyLots = [];
     if (becamePendingApproval) {
       emitOrgChange(req, "lot", {
         lotId: String(lot._id),
         action: "lot_pending_review",
         linkPath: `/review-lots?lotId=${encodeURIComponent(String(lot._id))}`,
       });
-      void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
     } else {
       let actionName = undefined;
       let linkPathStr = undefined;
@@ -1315,7 +1418,7 @@ router.patch("/:id", async (req, res) => {
       if (isNowDispatched && !wasDispatchedToSameParty) {
         actionName = "lot_dispatched";
         linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
-        void notifyLotDispatched({ lot: lotObj, ownerId: userId });
+        dispatchNotifyLots.push(lotObj);
       } else if (newPartyId && oldPartyId !== newPartyId) {
         actionName = "lot_assigned";
         linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
@@ -1336,6 +1439,12 @@ router.patch("/:id", async (req, res) => {
       res.json(responseLots);
     } else {
       res.json(lot);
+    }
+    if (becamePendingApproval) {
+      void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
+    }
+    for (const dLot of dispatchNotifyLots) {
+      void notifyLotDispatched({ lot: dLot, ownerId: userId });
     }
   } catch (error) {
     if (error.code === "DUPLICATE_LOT_NUMBER") {
@@ -1419,8 +1528,8 @@ router.delete("/:id", async (req, res) => {
     if (deletedLinkedId) responsePayload.deletedLinkedId = deletedLinkedId;
     if (updatedLinkedLot) responsePayload.updatedLinkedLot = updatedLinkedLot.toObject({ virtuals: true });
     
-    res.json(responsePayload);
     emitOrgChange(req, "lot", { lotId: String(lot._id) });
+    res.json(responsePayload);
   } catch (error) {
     res
       .status(500)

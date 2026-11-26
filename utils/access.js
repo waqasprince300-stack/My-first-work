@@ -373,6 +373,30 @@ const stripPrivateLotFieldsForParty = (doc) => {
   return plain;
 };
 
+/** Cast string/array ObjectId fields so MongoDB aggregate $match behaves like Mongoose queries. */
+const toAggregateObjectIdMatch = (
+  filter = {},
+  fields = ["userId", "businessOwnerId"],
+) => {
+  const out = { ...filter };
+  for (const field of fields) {
+    const val = out[field];
+    if (typeof val === "string" && mongoose.Types.ObjectId.isValid(val)) {
+      out[field] = new mongoose.Types.ObjectId(val);
+    } else if (val && typeof val === "object" && Array.isArray(val.$in)) {
+      out[field] = {
+        ...val,
+        $in: val.$in.map((v) =>
+          typeof v === "string" && mongoose.Types.ObjectId.isValid(v)
+            ? new mongoose.Types.ObjectId(v)
+            : v,
+        ),
+      };
+    }
+  }
+  return out;
+};
+
 module.exports = {
   getDataOwnerId,
   getBusinessOwnerFilter,
@@ -391,6 +415,7 @@ module.exports = {
   resolveBusinessOwner,
   resolveBusinessOwnerAllowMissing,
   stripPrivateLotFieldsForParty,
+  toAggregateObjectIdMatch,
   toObjectId,
   validateObjectIdParam,
 };

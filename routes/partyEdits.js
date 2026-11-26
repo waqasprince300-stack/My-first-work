@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const router = express.Router();
 const PartyEdit = require("../models/PartyEdit");
 const GhausiaLot = require("../models/GhausiaLot");
@@ -12,6 +13,7 @@ const {
   isParty,
   requireAdminUser,
   isTenantAdmin,
+  toAggregateObjectIdMatch,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
 const { emitOrgChange } = require("../utils/realtime");
@@ -40,6 +42,8 @@ const PARTY_EDIT_PARTY_FIELDS = [
   "receipt",
   "lotImages",
   "notes",
+  "partyVoiceNote",
+  "partyVoiceNoteDuration",
   "overrideStatus",
   "pendingRevision",
   "billRevisionRequest",
@@ -48,8 +52,160 @@ const PARTY_EDIT_PARTY_FIELDS = [
 
 const PARTY_EDIT_PATCH_FIELDS = [
   ...PARTY_EDIT_PARTY_FIELDS,
+  "adminNotes",
+  "adminVoiceNote",
+  "adminVoiceNoteDuration",
   "allotDate",
 ];
+
+const MAX_VOICE_NOTE_DATA_URL_CHARS = 12 * 1024 * 1024;
+const MAX_PARTY_EDIT_TOTAL_MEDIA_CHARS = Math.floor(14.5 * 1024 * 1024);
+const AUDIO_DATA_URL_RE =
+  /^data:audio\/[a-z0-9.+-]+(?:\s*;\s*[a-z0-9=.,"\s'+_-]+)*;base64,[A-Za-z0-9+/=\s]+$/i;
+
+function assertPartyEditMediaSizeSafe(payload, existingDoc = null) {
+  const effectiveReceipt = Object.prototype.hasOwnProperty.call(payload, "receipt")
+    ? payload.receipt
+    : existingDoc?.receipt;
+  const effectivePartyVoice = Object.prototype.hasOwnProperty.call(payload, "partyVoiceNote")
+    ? payload.partyVoiceNote
+    : existingDoc?.partyVoiceNote;
+  const effectiveAdminVoice = Object.prototype.hasOwnProperty.call(payload, "adminVoiceNote")
+    ? payload.adminVoiceNote
+    : existingDoc?.adminVoiceNote;
+  const effectiveImages = Object.prototype.hasOwnProperty.call(payload, "lotImages")
+    ? payload.lotImages
+    : existingDoc?.lotImages;
+
+  let total = 0;
+  if (typeof effectiveReceipt === "string") total += effectiveReceipt.length;
+  if (typeof effectivePartyVoice === "string") total += effectivePartyVoice.length;
+  if (typeof effectiveAdminVoice === "string") total += effectiveAdminVoice.length;
+  if (Array.isArray(effectiveImages)) {
+    for (const img of effectiveImages) {
+      if (typeof img === "string") total += img.length;
+    }
+  }
+  if (total > MAX_PARTY_EDIT_TOTAL_MEDIA_CHARS) {
+    return "Combined attachments (voice notes, receipt, and pictures) exceed the maximum record size (~14.5 MB). Upload shorter recordings or fewer images.";
+  }
+  return null;
+}
+
+function normalizeAndValidateVoiceNotes(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  for (const [field, durField] of [
+    ["partyVoiceNote", "partyVoiceNoteDuration"],
+    ["adminVoiceNote", "adminVoiceNoteDuration"],
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(payload, field)) {
+      const raw = payload[field];
+      if (raw == null) {
+        payload[field] = "";
+        payload[durField] = 0;
+        continue;
+      }
+      if (typeof raw !== "string") {
+        return `${field} must be an audio data URL string`;
+      }
+      const trimmed = raw.trim();
+      if (!trimmed) {
+        payload[field] = "";
+        payload[durField] = 0;
+        continue;
+      }
+      if (trimmed.length > MAX_VOICE_NOTE_DATA_URL_CHARS) {
+        return `${field} is too large to store in one record`;
+      }
+      if (!AUDIO_DATA_URL_RE.test(trimmed)) {
+        return `${field} must be a valid base64 audio recording`;
+      }
+      payload[field] = trimmed;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, durField)) {
+      const n = Number(payload[durField]);
+      payload[durField] =
+        Number.isFinite(n) && n >= 0 ? Math.round(n) : 0;
+    }
+  }
+  return null;
+}
+
+function enforcePartyPostApprovalLock(req, targetLotStatus, payload) {
+  if (
+    !isParty(req.user) ||
+    (targetLotStatus !== "completed" && targetLotStatus !== "received back")
+  ) {
+    return null;
+  }
+  const lockedAttempt =
+    Object.prototype.hasOwnProperty.call(payload, "partyBillAmount") ||
+    Object.prototype.hasOwnProperty.call(payload, "overrideStatus") ||
+    Object.prototype.hasOwnProperty.call(payload, "amountChangeNote") ||
+    Object.prototype.hasOwnProperty.call(payload, "completeDate") ||
+    Object.prototype.hasOwnProperty.call(payload, "pendingRevision") ||
+    Object.prototype.hasOwnProperty.call(payload, "notes") ||
+    Object.prototype.hasOwnProperty.call(payload, "partyVoiceNote") ||
+    Object.prototype.hasOwnProperty.call(payload, "partyVoiceNoteDuration");
+  delete payload.partyBillAmount;
+  delete payload.overrideStatus;
+  delete payload.amountChangeNote;
+  delete payload.completeDate;
+  delete payload.pendingRevision;
+  delete payload.notes;
+  delete payload.partyVoiceNote;
+  delete payload.partyVoiceNoteDuration;
+  if (lockedAttempt) {
+    return "Lot is already approved or completed. Party amount, notes, and voice note cannot be changed without admin permission.";
+  }
+  return null;
+}
+
+const ADMIN_LOCKED_NOTE_FIELDS = [
+  "adminNotes",
+  "adminVoiceNote",
+  "adminVoiceNoteDuration",
+];
+
+function enforceAdminPostApprovalLock(
+  targetLotStatus,
+  payload,
+  existingDoc = null,
+  allowInitialCreate = false,
+) {
+  if (
+    allowInitialCreate ||
+    (targetLotStatus !== "completed" && targetLotStatus !== "received back") ||
+    !payload ||
+    typeof payload !== "object"
+  ) {
+    return null;
+  }
+  let changed = false;
+  for (const field of ADMIN_LOCKED_NOTE_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(payload, field)) continue;
+    const nextNorm =
+      field === "adminVoiceNoteDuration"
+        ? Math.round(Number(payload[field] || 0))
+        : String(payload[field] ?? "").trim();
+    const prevNorm = existingDoc
+      ? field === "adminVoiceNoteDuration"
+        ? Math.round(Number(existingDoc[field] || 0))
+        : String(existingDoc[field] ?? "").trim()
+      : field === "adminVoiceNoteDuration"
+        ? 0
+        : "";
+    if (nextNorm !== prevNorm) {
+      changed = true;
+    } else {
+      delete payload[field];
+    }
+  }
+  if (changed) {
+    return "Lot is already approved or completed. Admin note and voice note cannot be changed after approval.";
+  }
+  return null;
+}
 
 const pickPartyEditPatch = (body) => {
   const out = {};
@@ -59,20 +215,32 @@ const pickPartyEditPatch = (body) => {
   return out;
 };
 
-/** Attach hasReceipt / lotImagesCount without shipping base64 blobs. */
+/** Attach hasReceipt / voice / lotImagesCount without shipping base64 blobs. */
 async function attachPartyEditImageMeta(filter, rows) {
   if (!Array.isArray(rows) || rows.length === 0) {
     return (rows || []).map((p) => ({ ...p, id: String(p._id || p.id) }));
   }
-  const [withReceipt, imageMeta] = await Promise.all([
+  const [withReceipt, withPartyVoice, withAdminVoice, imageMeta] = await Promise.all([
     PartyEdit.find({
       ...filter,
       receipt: { $exists: true, $nin: ["", null] },
     })
       .select("_id")
       .lean(),
+    PartyEdit.find({
+      ...filter,
+      partyVoiceNote: { $exists: true, $nin: ["", null] },
+    })
+      .select("_id")
+      .lean(),
+    PartyEdit.find({
+      ...filter,
+      adminVoiceNote: { $exists: true, $nin: ["", null] },
+    })
+      .select("_id")
+      .lean(),
     PartyEdit.aggregate([
-      { $match: filter },
+      { $match: toAggregateObjectIdMatch(filter) },
       {
         $project: {
           _id: 1,
@@ -82,6 +250,8 @@ async function attachPartyEditImageMeta(filter, rows) {
     ]),
   ]);
   const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
+  const partyVoiceIds = new Set(withPartyVoice.map((d) => String(d._id)));
+  const adminVoiceIds = new Set(withAdminVoice.map((d) => String(d._id)));
   const countById = new Map(
     imageMeta.map((d) => [String(d._id), Number(d.lotImagesCount) || 0]),
   );
@@ -97,6 +267,16 @@ async function attachPartyEditImageMeta(filter, rows) {
         typeof doc.receipt === "string" && doc.receipt.trim() !== ""
           ? true
           : receiptIds.has(id),
+      hasPartyVoiceNote:
+        typeof doc.partyVoiceNote === "string" &&
+        doc.partyVoiceNote.trim() !== ""
+          ? true
+          : partyVoiceIds.has(id),
+      hasAdminVoiceNote:
+        typeof doc.adminVoiceNote === "string" &&
+        doc.adminVoiceNote.trim() !== ""
+          ? true
+          : adminVoiceIds.has(id),
       hasLotImages: lotImagesCount > 0,
       lotImagesCount,
     };
@@ -138,8 +318,14 @@ async function assertLotImagesWithinColorLimit(req, lotId, lotImages) {
   return null;
 }
 
-const getAllowedPartyLotIds = async (req) => {
+const getAllowedPartyLotIds = async (req, { allBusinesses = false } = {}) => {
   if (!isParty(req.user)) return null;
+  if (allBusinesses) {
+    const lots = await GhausiaLot.find(getPartyAllBusinessLotsFilter(req.user))
+      .select("_id")
+      .lean();
+    return lots.map((lot) => String(lot._id));
+  }
   const pid = String(req.user.partyId || "").trim();
   if (!pid) return [];
   const lots = await GhausiaLot.find({
@@ -184,17 +370,22 @@ router.get("/", async (req, res) => {
       String(req.query.includeReceipts || "").toLowerCase() === "1" ||
       req.query.includeReceipts === "true";
     const pagination = parsePaginationQuery(req);
-    // Base64 images are heavy — excluded unless explicitly requested.
-    // includeReceipts = bill only; includeLotImages = lot pictures only (see GET /lot/:id).
-    const heavyImageSelect = "-receipt -lotImages";
+    // Base64 media blobs are heavy — excluded unless explicitly requested.
+    // includeReceipts = bill only; includeLotImages = lot pictures only; includeVoiceNotes = voice notes (see GET /lot/:id).
+    const heavyImageSelect =
+      "-receipt -lotImages -partyVoiceNote -adminVoiceNote";
     let query = PartyEdit.find(filter).sort({ createdAt: -1 });
     if (!includeReceipts) query = query.select(heavyImageSelect);
-    else query = query.select("-lotImages");
+    else query = query.select("-lotImages -partyVoiceNote -adminVoiceNote");
     if (pagination.paginate) {
       const [rows, total] = await Promise.all([
         PartyEdit.find(filter)
           .sort({ createdAt: -1 })
-          .select(includeReceipts ? "-lotImages" : heavyImageSelect)
+          .select(
+            includeReceipts
+              ? "-lotImages -partyVoiceNote -adminVoiceNote"
+              : heavyImageSelect,
+          )
           .skip(pagination.skip)
           .limit(pagination.limit)
           .lean(),
@@ -218,7 +409,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Get party edit for a single lot (optional receipt / lot pictures for lazy loading)
+// Get party edit for a single lot (optional receipt / lot pictures / voice notes for lazy loading)
 router.get("/lot/:lotId", async (req, res) => {
   try {
     const lotIdStr = String(req.params.lotId || "").trim();
@@ -231,6 +422,9 @@ router.get("/lot/:lotId", async (req, res) => {
     const includeLotImages =
       String(req.query.includeLotImages || "").toLowerCase() === "1" ||
       req.query.includeLotImages === "true";
+    const includeVoiceNotes =
+      String(req.query.includeVoiceNotes || "").toLowerCase() === "1" ||
+      req.query.includeVoiceNotes === "true";
 
     if (isParty(req.user)) {
       const lot = await GhausiaLot.findOne(
@@ -259,6 +453,7 @@ router.get("/lot/:lotId", async (req, res) => {
     const exclude = [];
     if (!includeReceipts) exclude.push("-receipt");
     if (!includeLotImages) exclude.push("-lotImages");
+    if (!includeVoiceNotes) exclude.push("-partyVoiceNote", "-adminVoiceNote");
     const fieldSelect = exclude.length ? exclude.join(" ") : undefined;
 
     let row = await PartyEdit.findOne({
@@ -287,14 +482,44 @@ router.get("/lot/:lotId", async (req, res) => {
         hasReceipt: false,
         hasLotImages: false,
         lotImagesCount: 0,
+        hasPartyVoiceNote: false,
+        hasAdminVoiceNote: false,
+        partyVoiceNoteDuration: 0,
+        adminVoiceNoteDuration: 0,
+        adminNotes: "",
       });
     }
     const lotImagesCount = Array.isArray(row.lotImages)
       ? row.lotImages.length
       : undefined;
+    let hasPartyVoiceNote;
+    let hasAdminVoiceNote;
+    if (includeVoiceNotes) {
+      hasPartyVoiceNote =
+        typeof row.partyVoiceNote === "string" &&
+        row.partyVoiceNote.trim() !== "";
+      hasAdminVoiceNote =
+        typeof row.adminVoiceNote === "string" &&
+        row.adminVoiceNote.trim() !== "";
+    } else {
+      const [pv, av] = await Promise.all([
+        PartyEdit.exists({
+          _id: row._id,
+          partyVoiceNote: { $exists: true, $nin: ["", null] },
+        }),
+        PartyEdit.exists({
+          _id: row._id,
+          adminVoiceNote: { $exists: true, $nin: ["", null] },
+        }),
+      ]);
+      hasPartyVoiceNote = Boolean(pv);
+      hasAdminVoiceNote = Boolean(av);
+    }
     res.json({
       ...row,
       id: String(row._id),
+      hasPartyVoiceNote,
+      hasAdminVoiceNote,
       ...(lotImagesCount !== undefined
         ? { lotImagesCount, hasLotImages: lotImagesCount > 0 }
         : {}),
@@ -306,20 +531,38 @@ router.get("/lot/:lotId", async (req, res) => {
   }
 });
 
+const withVoiceFlags = (docObj) => ({
+  ...docObj,
+  id: docObj?._id ? String(docObj._id) : docObj?.id,
+  hasPartyVoiceNote:
+    typeof docObj?.partyVoiceNote === "string" &&
+    docObj.partyVoiceNote.trim() !== "",
+  hasAdminVoiceNote:
+    typeof docObj?.adminVoiceNote === "string" &&
+    docObj.adminVoiceNote.trim() !== "",
+});
+
 // Get single party edit
 router.get("/:id", async (req, res) => {
   try {
-    const allowedLotIds = await getAllowedPartyLotIds(req);
+    const allowedLotIds = await getAllowedPartyLotIds(req, { allBusinesses: true });
     const partyEdit = await PartyEdit.findOne({
       _id: req.params.id,
       ...getOwnerFilter(req),
-      ...getBusinessOwnerFilter(req),
-      ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
+      ...(isParty(req.user) || isTenantAdmin(req.user) ? {} : getBusinessOwnerFilter(req)),
+      ...(allowedLotIds !== null ? { lotId: { $in: allowedLotIds } } : {}),
     });
     if (!partyEdit) {
       return res.status(404).json({ message: "Party edit not found" });
     }
-    res.json(partyEdit);
+    const obj = partyEdit.toObject();
+    const imgCount = Array.isArray(obj.lotImages) ? obj.lotImages.length : 0;
+    res.json({
+      ...withVoiceFlags(obj),
+      hasReceipt: typeof obj.receipt === "string" && obj.receipt.trim() !== "",
+      lotImagesCount: imgCount,
+      hasLotImages: imgCount > 0,
+    });
   } catch (error) {
     res
       .status(500)
@@ -331,21 +574,66 @@ router.get("/:id", async (req, res) => {
 router.post("/", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const payload = stripOwnership(req.body);
+    const ownerId = getDataOwnerId(req.user);
+    const cleanLotId = payload.lotId ? String(payload.lotId).trim() : "";
+    let businessOwnerId = req.businessOwnerId;
+    if (cleanLotId) {
+      if (!mongoose.Types.ObjectId.isValid(cleanLotId)) {
+        return res.status(400).json({ message: "Invalid lotId" });
+      }
+      const targetLot = await GhausiaLot.findOne({
+        _id: cleanLotId,
+        userId: ownerId,
+      })
+        .select("status createdAt businessOwnerId")
+        .lean();
+      if (!targetLot) {
+        return res.status(404).json({ message: "Lot not found" });
+      }
+      if (targetLot.businessOwnerId) {
+        businessOwnerId = String(targetLot.businessOwnerId);
+      }
+      if (
+        ADMIN_LOCKED_NOTE_FIELDS.some((f) =>
+          Object.prototype.hasOwnProperty.call(payload, f),
+        )
+      ) {
+        const targetLotStatus = String(targetLot.status || "")
+          .toLowerCase()
+          .trim();
+        const allowInitialCreate =
+          Boolean(targetLot.createdAt) &&
+          Date.now() - new Date(targetLot.createdAt).getTime() <= 15000;
+        const adminLockError = enforceAdminPostApprovalLock(
+          targetLotStatus,
+          payload,
+          null,
+          allowInitialCreate,
+        );
+        if (adminLockError) {
+          return res.status(403).json({ message: adminLockError });
+        }
+      }
+    }
+    const voiceError = normalizeAndValidateVoiceNotes(payload);
+    if (voiceError) {
+      return res.status(400).json({ message: voiceError });
+    }
+    const sizeError = assertPartyEditMediaSizeSafe(payload, null);
+    if (sizeError) {
+      return res.status(400).json({ message: sizeError });
+    }
     const partyEdit = new PartyEdit({
-      ...stripOwnership(req.body),
-      userId: getDataOwnerId(req.user),
-      businessOwnerId: req.businessOwnerId,
+      ...payload,
+      userId: ownerId,
+      businessOwnerId,
     });
     const savedPartyEdit = await partyEdit.save();
-    res
-      .status(201)
-      .json({
-        ...savedPartyEdit.toObject(),
-        id: savedPartyEdit._id.toString(),
-      });
     emitOrgChange(req, "partyEdit", {
       lotId: String(savedPartyEdit.lotId || ""),
     });
+    res.status(201).json(withVoiceFlags(savedPartyEdit.toObject()));
   } catch (error) {
     res
       .status(400)
@@ -356,12 +644,12 @@ router.post("/", async (req, res) => {
 // Update party edit by MongoDB _id
 router.patch("/:id", async (req, res) => {
   try {
-    const allowedLotIds = await getAllowedPartyLotIds(req);
+    const allowedLotIds = await getAllowedPartyLotIds(req, { allBusinesses: true });
     const accessFilter = {
       _id: req.params.id,
       ...getOwnerFilter(req),
-      ...getBusinessOwnerFilter(req),
-      ...(allowedLotIds ? { lotId: { $in: allowedLotIds } } : {}),
+      ...(isParty(req.user) || isTenantAdmin(req.user) ? {} : getBusinessOwnerFilter(req)),
+      ...(allowedLotIds !== null ? { lotId: { $in: allowedLotIds } } : {}),
     };
     const patch = isParty(req.user)
       ? Object.fromEntries(
@@ -371,18 +659,29 @@ router.patch("/:id", async (req, res) => {
         )
       : pickPartyEditPatch(req.body);
 
-    const needsExisting =
-      isParty(req.user) ||
+    const touchesAdminNote = ADMIN_LOCKED_NOTE_FIELDS.some((f) =>
+      Object.prototype.hasOwnProperty.call(patch, f),
+    );
+    const touchesMedia =
+      Object.prototype.hasOwnProperty.call(patch, "receipt") ||
+      Object.prototype.hasOwnProperty.call(patch, "partyVoiceNote") ||
+      Object.prototype.hasOwnProperty.call(patch, "adminVoiceNote") ||
       Object.prototype.hasOwnProperty.call(patch, "lotImages");
+    const needsExisting =
+      isParty(req.user) || touchesAdminNote || touchesMedia;
     let existing = null;
     if (needsExisting) {
-      existing = await PartyEdit.findOne(accessFilter).select("lotId").lean();
+      existing = await PartyEdit.findOne(accessFilter)
+        .select(
+          "lotId adminNotes adminVoiceNote adminVoiceNoteDuration receipt partyVoiceNote lotImages",
+        )
+        .lean();
       if (!existing) {
         return res.status(404).json({ message: "Party edit not found" });
       }
     }
 
-    if (isParty(req.user) && existing?.lotId) {
+    if ((isParty(req.user) || touchesAdminNote) && existing?.lotId) {
       const targetLot = await GhausiaLot.findOne({
         _id: existing.lotId,
         userId: getDataOwnerId(req.user),
@@ -392,23 +691,32 @@ router.patch("/:id", async (req, res) => {
       const targetLotStatus = String(targetLot?.status || "")
         .toLowerCase()
         .trim();
-      if (targetLotStatus === "completed" || targetLotStatus === "received back") {
-        const lockedAttempt =
-          Object.prototype.hasOwnProperty.call(patch, "partyBillAmount") ||
-          Object.prototype.hasOwnProperty.call(patch, "overrideStatus") ||
-          Object.prototype.hasOwnProperty.call(patch, "amountChangeNote");
-        delete patch.partyBillAmount;
-        delete patch.overrideStatus;
-        delete patch.amountChangeNote;
-        delete patch.completeDate;
-        delete patch.pendingRevision;
-        if (lockedAttempt && Object.keys(patch).length === 0) {
-          return res.status(403).json({
-            message:
-              "Lot is already completed or received back. Request a bill revision instead of editing amount or status directly.",
-          });
-        }
+      const lockError = enforcePartyPostApprovalLock(
+        req,
+        targetLotStatus,
+        patch,
+      );
+      if (lockError) {
+        return res.status(403).json({ message: lockError });
       }
+      const adminLockError = enforceAdminPostApprovalLock(
+        targetLotStatus,
+        patch,
+        existing,
+        false,
+      );
+      if (adminLockError) {
+        return res.status(403).json({ message: adminLockError });
+      }
+    }
+
+    const voiceError = normalizeAndValidateVoiceNotes(patch);
+    if (voiceError) {
+      return res.status(400).json({ message: voiceError });
+    }
+    const sizeError = assertPartyEditMediaSizeSafe(patch, existing);
+    if (sizeError) {
+      return res.status(400).json({ message: sizeError });
     }
 
     if (Object.prototype.hasOwnProperty.call(patch, "lotImages")) {
@@ -429,8 +737,8 @@ router.patch("/:id", async (req, res) => {
     if (!partyEdit) {
       return res.status(404).json({ message: "Party edit not found" });
     }
-    res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
     emitOrgChange(req, "partyEdit", { lotId: String(partyEdit.lotId || "") });
+    res.json(withVoiceFlags(partyEdit.toObject()));
   } catch (error) {
     res
       .status(400)
@@ -446,6 +754,7 @@ router.put("/lot/:lotId", async (req, res) => {
     let businessOwnerId = req.businessOwnerId;
 
     let targetLotStatus = "";
+    let lotCreatedAt = null;
     if (isParty(req.user)) {
       const lot = await GhausiaLot.findOne(
         getPartyAccessibleLotFilter(req.user, { _id: lotId }),
@@ -457,6 +766,19 @@ router.put("/lot/:lotId", async (req, res) => {
       }
       businessOwnerId = String(lot.businessOwnerId ?? "").trim();
       targetLotStatus = String(lot.status || "").toLowerCase().trim();
+      lotCreatedAt = lot.createdAt || null;
+    } else {
+      const lot = await GhausiaLot.findOne({ _id: lotId, userId })
+        .select("businessOwnerId status createdAt")
+        .lean();
+      if (!lot) {
+        return res.status(404).json({ message: "Lot not found" });
+      }
+      targetLotStatus = String(lot.status || "").toLowerCase().trim();
+      lotCreatedAt = lot.createdAt || null;
+      if (lot.businessOwnerId) {
+        businessOwnerId = String(lot.businessOwnerId).trim();
+      }
     }
 
     if (Object.prototype.hasOwnProperty.call(req.body, "lotImages")) {
@@ -478,25 +800,76 @@ router.put("/lot/:lotId", async (req, res) => {
         )
       : stripOwnership(req.body);
 
+    const lockError = enforcePartyPostApprovalLock(
+      req,
+      targetLotStatus,
+      picked,
+    );
+    if (lockError) {
+      return res.status(403).json({ message: lockError });
+    }
+
+    const touchesAdminNote = ADMIN_LOCKED_NOTE_FIELDS.some((f) =>
+      Object.prototype.hasOwnProperty.call(picked, f),
+    );
+    const touchesMedia =
+      Object.prototype.hasOwnProperty.call(picked, "receipt") ||
+      Object.prototype.hasOwnProperty.call(picked, "partyVoiceNote") ||
+      Object.prototype.hasOwnProperty.call(picked, "adminVoiceNote") ||
+      Object.prototype.hasOwnProperty.call(picked, "lotImages");
+
+    let existingPe = null;
     if (
-      isParty(req.user) &&
-      (targetLotStatus === "completed" || targetLotStatus === "received back")
+      ((targetLotStatus === "completed" ||
+        targetLotStatus === "received back") &&
+        touchesAdminNote) ||
+      touchesMedia
     ) {
-      const lockedAttempt =
-        Object.prototype.hasOwnProperty.call(picked, "partyBillAmount") ||
-        Object.prototype.hasOwnProperty.call(picked, "overrideStatus") ||
-        Object.prototype.hasOwnProperty.call(picked, "amountChangeNote");
-      delete picked.partyBillAmount;
-      delete picked.overrideStatus;
-      delete picked.amountChangeNote;
-      delete picked.completeDate;
-      delete picked.pendingRevision;
-      if (lockedAttempt && Object.keys(picked).length === 0) {
-        return res.status(403).json({
-          message:
-            "Lot is already completed or received back. Request a bill revision instead of editing amount or status directly.",
-        });
+      existingPe = await PartyEdit.findOne({
+        lotId,
+        userId,
+        businessOwnerId,
+      })
+        .select(
+          "adminNotes adminVoiceNote adminVoiceNoteDuration receipt partyVoiceNote lotImages",
+        )
+        .lean();
+      if (!existingPe) {
+        existingPe = await PartyEdit.findOne({ lotId, userId })
+          .select(
+            "adminNotes adminVoiceNote adminVoiceNoteDuration receipt partyVoiceNote lotImages",
+          )
+          .lean();
       }
+    }
+
+    if (
+      (targetLotStatus === "completed" ||
+        targetLotStatus === "received back") &&
+      touchesAdminNote
+    ) {
+      const allowInitialCreate =
+        !existingPe &&
+        Boolean(lotCreatedAt) &&
+        Date.now() - new Date(lotCreatedAt).getTime() <= 15000;
+      const adminLockError = enforceAdminPostApprovalLock(
+        targetLotStatus,
+        picked,
+        existingPe,
+        allowInitialCreate,
+      );
+      if (adminLockError) {
+        return res.status(403).json({ message: adminLockError });
+      }
+    }
+
+    const voiceError = normalizeAndValidateVoiceNotes(picked);
+    if (voiceError) {
+      return res.status(400).json({ message: voiceError });
+    }
+    const sizeError = assertPartyEditMediaSizeSafe(picked, existingPe);
+    if (sizeError) {
+      return res.status(400).json({ message: sizeError });
     }
 
     const data = {
@@ -552,8 +925,6 @@ router.put("/lot/:lotId", async (req, res) => {
       update,
       { new: true, upsert: true, runValidators: true },
     );
-    res.json({ ...partyEdit.toObject(), id: partyEdit._id.toString() });
-
     const bodyRev = req.body?.billRevisionRequest;
     const isNewPendingBillRev =
       isParty(req.user) &&
@@ -564,6 +935,39 @@ router.put("/lot/:lotId", async (req, res) => {
       bodyRev &&
       typeof bodyRev === "object" &&
       String(bodyRev.status || "").toLowerCase() === "pending";
+
+    const isRevResolvedByAdmin =
+      !isParty(req.user) &&
+      Object.prototype.hasOwnProperty.call(
+        req.body || {},
+        "billRevisionRequest",
+      );
+    const revApproved = isRevResolvedByAdmin && bodyRev === null && prevBillRev;
+    const revRejected =
+      isRevResolvedByAdmin &&
+      bodyRev &&
+      typeof bodyRev === "object" &&
+      String(bodyRev.status || "").toLowerCase() === "rejected";
+
+    if (isNewPendingBillRev) {
+      const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}&billReview=1`;
+      emitOrgChange(req, "partyEdit", {
+        lotId: String(lotId),
+        action: "bill_revision_request",
+        linkPath,
+      });
+    } else if (revApproved || revRejected) {
+      const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}`;
+      emitOrgChange(req, "partyEdit", {
+        lotId: String(lotId),
+        action: revApproved ? "bill_revision_approved" : "bill_revision_rejected",
+        linkPath,
+      });
+    } else {
+      emitOrgChange(req, "partyEdit", { lotId: String(lotId) });
+    }
+
+    res.json(withVoiceFlags(partyEdit.toObject()));
 
     const loadLotForNotify = async () => {
       try {
@@ -581,12 +985,6 @@ router.put("/lot/:lotId", async (req, res) => {
 
     if (isNewPendingBillRev) {
       const lotForNotify = await loadLotForNotify();
-      const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}&billReview=1`;
-      emitOrgChange(req, "partyEdit", {
-        lotId: String(lotId),
-        action: "bill_revision_request",
-        linkPath,
-      });
       if (lotForNotify) {
         void notifyBillRevisionRequest({
           lot: lotForNotify,
@@ -596,57 +994,31 @@ router.put("/lot/:lotId", async (req, res) => {
           reason: bodyRev.reason,
         });
       }
-    } else if (
-      !isParty(req.user) &&
-      Object.prototype.hasOwnProperty.call(
-        req.body || {},
-        "billRevisionRequest",
-      )
-    ) {
-      const approved = bodyRev === null && prevBillRev;
-      const rejected =
-        bodyRev &&
-        typeof bodyRev === "object" &&
-        String(bodyRev.status || "").toLowerCase() === "rejected";
-      if (approved || rejected) {
-        const lotForNotify = await loadLotForNotify();
-        const linkPath = `/party-ledger?lotId=${encodeURIComponent(String(lotId))}`;
-        const action = approved
-          ? "bill_revision_approved"
-          : "bill_revision_rejected";
-        emitOrgChange(req, "partyEdit", {
-          lotId: String(lotId),
-          action,
-          linkPath,
+    } else if (revApproved || revRejected) {
+      const lotForNotify = await loadLotForNotify();
+      if (lotForNotify) {
+        void notifyBillRevisionResolved({
+          lot: lotForNotify,
+          ownerId: userId,
+          approved: Boolean(revApproved),
+          fromAmount: prevBillRev?.fromAmount ?? bodyRev?.fromAmount,
+          toAmount: prevBillRev?.toAmount ?? bodyRev?.toAmount,
+          note: bodyRev?.rejectionNote,
         });
-        if (lotForNotify) {
-          void notifyBillRevisionResolved({
-            lot: lotForNotify,
-            ownerId: userId,
-            approved: Boolean(approved),
-            fromAmount: prevBillRev?.fromAmount ?? bodyRev?.fromAmount,
-            toAmount: prevBillRev?.toAmount ?? bodyRev?.toAmount,
-            note: bodyRev?.rejectionNote,
-          });
-          void Notification.updateMany(
-            { lotId: String(lotId), type: "bill_revision_request", readAt: null },
-            { $set: { readAt: new Date() } }
-          ).then((r) => {
-            if (r?.modifiedCount > 0) {
-              emitOrgChange(req, "notification", {
-                action: "notifications_marked_read",
-                targetUserId: String(req.user._id),
-                lotId: String(lotId),
-                category: "bill_revision",
-              });
-            }
-          }).catch(() => {});
-        }
-      } else {
-        emitOrgChange(req, "partyEdit", { lotId: String(lotId) });
+        void Notification.updateMany(
+          { lotId: String(lotId), type: "bill_revision_request", readAt: null },
+          { $set: { readAt: new Date() } }
+        ).then((r) => {
+          if (r?.modifiedCount > 0) {
+            emitOrgChange(req, "notification", {
+              action: "notifications_marked_read",
+              targetUserId: String(req.user._id),
+              lotId: String(lotId),
+              category: "bill_revision",
+            });
+          }
+        }).catch(() => {});
       }
-    } else {
-      emitOrgChange(req, "partyEdit", { lotId: String(lotId) });
     }
   } catch (error) {
     res

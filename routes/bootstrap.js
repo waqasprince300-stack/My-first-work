@@ -14,6 +14,7 @@ const {
   getBusinessOwnerFilter,
   isParty,
   isTenantAdmin,
+  toAggregateObjectIdMatch,
 } = require("../utils/access");
 
 const mapPayment = (doc) => ({ ...doc, id: String(doc._id) });
@@ -91,18 +92,30 @@ async function fetchPartyEdits(
   if (receiptSelect) query = query.select(receiptSelect);
   const rows = await query.lean();
 
-  // When base64 images are excluded, still tell the client which lots have a bill / how many
-  // lot pictures exist so the UI can show accurate badges without downloading blobs.
+  // When base64 media blobs are excluded, still tell the client which lots have a bill,
+  // voice notes, or lot pictures so the UI can show badges without downloading blobs.
   if (receiptSelect) {
-    const [withReceipt, imageMeta] = await Promise.all([
+    const [withReceipt, withPartyVoice, withAdminVoice, imageMeta] = await Promise.all([
       PartyEdit.find({
         ...filter,
         receipt: { $exists: true, $nin: ["", null] },
       })
         .select("_id")
         .lean(),
+      PartyEdit.find({
+        ...filter,
+        partyVoiceNote: { $exists: true, $nin: ["", null] },
+      })
+        .select("_id")
+        .lean(),
+      PartyEdit.find({
+        ...filter,
+        adminVoiceNote: { $exists: true, $nin: ["", null] },
+      })
+        .select("_id")
+        .lean(),
       PartyEdit.aggregate([
-        { $match: filter },
+        { $match: toAggregateObjectIdMatch(filter) },
         {
           $project: {
             _id: 1,
@@ -112,14 +125,19 @@ async function fetchPartyEdits(
       ]),
     ]);
     const receiptIds = new Set(withReceipt.map((d) => String(d._id)));
+    const partyVoiceIds = new Set(withPartyVoice.map((d) => String(d._id)));
+    const adminVoiceIds = new Set(withAdminVoice.map((d) => String(d._id)));
     const countById = new Map(
       imageMeta.map((d) => [String(d._id), Number(d.lotImagesCount) || 0]),
     );
     return rows.map((doc) => {
-      const lotImagesCount = countById.get(String(doc._id)) || 0;
+      const idStr = String(doc._id);
+      const lotImagesCount = countById.get(idStr) || 0;
       return {
         ...mapPartyEdit(doc),
-        hasReceipt: receiptIds.has(String(doc._id)),
+        hasReceipt: receiptIds.has(idStr),
+        hasPartyVoiceNote: partyVoiceIds.has(idStr),
+        hasAdminVoiceNote: adminVoiceIds.has(idStr),
         hasLotImages: lotImagesCount > 0,
         lotImagesCount,
       };
@@ -133,6 +151,12 @@ async function fetchPartyEdits(
     return {
       ...mapPartyEdit(doc),
       hasReceipt: typeof doc.receipt === "string" && doc.receipt.trim() !== "",
+      hasPartyVoiceNote:
+        typeof doc.partyVoiceNote === "string" &&
+        doc.partyVoiceNote.trim() !== "",
+      hasAdminVoiceNote:
+        typeof doc.adminVoiceNote === "string" &&
+        doc.adminVoiceNote.trim() !== "",
       hasLotImages: lotImagesCount > 0,
       lotImagesCount,
     };
@@ -233,7 +257,9 @@ router.get("/", async (req, res) => {
       return originalJson.call(this, body);
     };
 
-    const receiptSelect = includeReceipts ? "" : "-receipt -lotImages";
+    const receiptSelect = includeReceipts
+      ? ""
+      : "-receipt -lotImages -partyVoiceNote -adminVoiceNote";
 
     if (isTenantAdmin(req.user)) {
       const userId = getDataOwnerId(req.user);
