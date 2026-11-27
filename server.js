@@ -20,6 +20,7 @@ const {
 const {
   resolveBusinessOwner,
   resolveBusinessOwnerAllowMissing,
+  resolveBusinessOwnerAllowArchivedRead,
 } = require("./utils/access");
 
 // Import routes
@@ -135,7 +136,12 @@ app.use(
 const jwt = require("jsonwebtoken");
 const User = require("./models/User");
 const { getDataOwnerId } = require("./utils/access");
-const { orgRoom, userRoom } = require("./utils/realtime");
+const {
+  adminRoom,
+  allPartiesRoom,
+  partyRoom,
+  userRoom,
+} = require("./utils/realtime");
 
 const { getSocketJwtSecret } = require("./utils/jwt");
 io.use(async (socket, next) => {
@@ -147,11 +153,13 @@ io.use(async (socket, next) => {
     if (!token || !secret) return next();
     const decoded = jwt.verify(String(token), secret);
     const user = await User.findById(decoded.id)
-      .select("role ownerId approvedBy status")
+      .select("role ownerId approvedBy status partyId")
       .lean();
     if (user && user.status === "approved") {
       socket.data.ownerId = String(getDataOwnerId(user) || "");
       socket.data.userId = String(user._id);
+      socket.data.role = String(user.role || "");
+      socket.data.partyId = String(user.partyId || "").trim();
     }
   } catch {
     /* ignore — connect without a room */
@@ -161,11 +169,19 @@ io.use(async (socket, next) => {
 
 // ✅ Socket.io connection handler
 io.on("connection", (socket) => {
-  if (socket.data.ownerId) {
-    socket.join(orgRoom(socket.data.ownerId));
+  const { ownerId, userId, role, partyId } = socket.data || {};
+  if (ownerId) {
+    if (role === "admin") {
+      socket.join(adminRoom(ownerId));
+    } else if (role === "party") {
+      socket.join(allPartiesRoom(ownerId));
+      if (partyId) {
+        socket.join(partyRoom(ownerId, partyId));
+      }
+    }
   }
-  if (socket.data.userId) {
-    socket.join(userRoom(socket.data.userId));
+  if (userId) {
+    socket.join(userRoom(userId));
   }
 
   socket.on("disconnect", () => {
@@ -254,7 +270,7 @@ app.use(
   "/api/partyEdits",
   authenticate,
   requireApproved,
-  resolveBusinessOwner,
+  resolveBusinessOwnerAllowArchivedRead,
   partyEditsRouter,
 );
 app.use(

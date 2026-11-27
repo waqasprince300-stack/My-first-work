@@ -4,7 +4,6 @@ const PartyLedger = require("../models/PartyLedger");
 const {
   getDataOwnerId,
   getScopedFilter,
-  isParty,
   requireAdminUser,
 } = require("../utils/access");
 
@@ -18,13 +17,14 @@ const stripOwnership = ({
   ...data
 }) => data;
 
-// Get all ledger entries
+// Get all ledger entries (Admin only — contains admin billAmount totals)
 router.get("/", async (req, res) => {
   try {
+    if (!requireAdminUser(req, res)) return;
     const { partyId } = req.query;
     let query = getScopedFilter(req);
 
-    if (partyId && !isParty(req.user)) {
+    if (partyId) {
       query.partyId = partyId;
     }
 

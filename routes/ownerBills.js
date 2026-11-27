@@ -18,14 +18,18 @@ const isValidObjectId = (val) =>
 const formatLotLinkedKey = (item) => {
   const base = String(item?.lotNo || item?.lotNumber || "").trim();
   if (!base) return "";
+  let key = base;
   if (
     item?.suitComponent === "dupatta" &&
-    !base.endsWith("-D") &&
-    !base.endsWith("(D)")
+    !key.endsWith("-D") &&
+    !key.endsWith("(D)")
   ) {
-    return `${base}-D`;
+    key = `${key}-D`;
   }
-  return base;
+  if (item?.isRework && !/\(rework\)\s*$/i.test(key)) {
+    key = `${key} (Rework)`;
+  }
+  return key;
 };
 
 const toSafeNum = (val) => {
@@ -51,9 +55,12 @@ const sanitizeBillPayload = (body = {}) => {
       lotNo: String(l?.lotNo || l?.lotNumber || "").trim(),
       designNo: String(l?.designNo || "").trim(),
       suitComponent: String(l?.suitComponent || "main").trim(),
+      isRework: Boolean(l?.isRework),
       quantity: qty,
       rate,
       amount,
+      ...(l?.preBillRate != null ? { preBillRate: toSafeNum(l.preBillRate) } : {}),
+      ...(l?.preBillAmount != null ? { preBillAmount: toSafeNum(l.preBillAmount) } : {}),
       note: String(l?.note || ""),
     };
   });
@@ -119,13 +126,7 @@ const sanitizeBillPayload = (body = {}) => {
   };
 };
 
-const bizScopeFilter = (bizId) => ({
-  $or: [
-    { businessOwnerId: bizId },
-    { businessOwnerId: null },
-    { businessOwnerId: { $exists: false } },
-  ],
-});
+const bizScopeFilter = (bizId) => (bizId ? { businessOwnerId: bizId } : {});
 
 const buildSingleLotFilter = (item, userId, bizId) => {
   const singleId = String(item?.lotId || item?._id || item?.id || "").trim();
@@ -145,11 +146,129 @@ const buildSingleLotFilter = (item, userId, bizId) => {
       bizScopeFilter(bizId),
       { $or: [{ lotNo: singleNo }, { lotNumber: singleNo }] },
       { suitComponent: comp === "dupatta" ? "dupatta" : { $ne: "dupatta" } },
-      { isRework: { $ne: true } },
+      { isRework: item?.isRework ? true : { $ne: true } },
       { status: { $in: ["received back", "pending"] } },
     ],
   };
 };
+
+/**
+ * Mark lots included in a finalized OwnerBill as `completed` (including combined Rs 0
+ * dupatta child lots linked via `linkedLotId` so they don't remain stuck in Billable).
+ * Returns resolved `_id`s and updates `item.isRework` / `preBillRate` / `preBillAmount`.
+ */
+async function markIncludedLotsForBill(bill, userId, bizId, now) {
+  let modifiedLotsCount = 0;
+  const protectedObjectIds = [];
+  let billLotsMutated = false;
+
+  for (const item of bill.lots || []) {
+    const lotQuery = buildSingleLotFilter(item, userId, bizId);
+    if (!lotQuery) continue;
+
+    const targetLots = await GhausiaLot.find(lotQuery).select(
+      "_id rate billAmount receivedBackDate completionApprovedAt suitComponent linkedLotId isRework ownerBillId",
+    );
+    for (const tLot of targetLots) {
+      protectedObjectIds.push(tLot._id);
+      if (item.preBillRate == null && String(tLot.ownerBillId || "") !== String(bill._id)) {
+        item.preBillRate = Number(tLot.rate ?? 0);
+        item.preBillAmount = Number(tLot.billAmount ?? 0);
+        item.isRework = Boolean(tLot.isRework);
+        billLotsMutated = true;
+      }
+
+      const itemRate = Number(item.rate || 0);
+      const itemAmount = Number(item.amount || 0);
+      const setPatch = {
+        status: "completed",
+        ownerBillId: bill._id,
+        billedInBillNo: bill.billNo,
+        billedInBookNo: bill.bookNo,
+      };
+      if (!tLot.completionApprovedAt) {
+        setPatch.completionApprovedAt = now;
+      }
+      if (!tLot.receivedBackDate) {
+        setPatch.receivedBackDate = toDateOrNow(bill.date);
+      }
+      if (itemRate > 0) setPatch.rate = itemRate;
+      if (itemAmount > 0) {
+        setPatch.billAmount = itemAmount;
+        setPatch.totalAmount = itemAmount;
+      }
+      const uRes = await GhausiaLot.updateOne({ _id: tLot._id }, { $set: setPatch });
+      modifiedLotsCount += uRes.modifiedCount || 0;
+
+      // Complete combined Rs 0 dupatta child alongside parent Kameez lot
+      if (tLot.suitComponent !== "dupatta" && tLot.linkedLotId) {
+        const child = await GhausiaLot.findOne({
+          _id: tLot.linkedLotId,
+          userId,
+          suitComponent: "dupatta",
+        }).select("_id ownerBillingChoice billAmount receivedBackDate completionApprovedAt");
+        if (
+          child &&
+          (child.ownerBillingChoice === "combined" || Number(child.billAmount || 0) === 0)
+        ) {
+          protectedObjectIds.push(child._id);
+          const childPatch = {
+            status: "completed",
+            ownerBillId: bill._id,
+            billedInBillNo: bill.billNo,
+            billedInBookNo: bill.bookNo,
+          };
+          if (!child.completionApprovedAt) childPatch.completionApprovedAt = now;
+          if (!child.receivedBackDate) childPatch.receivedBackDate = toDateOrNow(bill.date);
+          const cu = await GhausiaLot.updateOne({ _id: child._id }, { $set: childPatch });
+          modifiedLotsCount += cu.modifiedCount || 0;
+        }
+      }
+    }
+  }
+
+  if (billLotsMutated) {
+    await OwnerBill.updateOne({ _id: bill._id }, { $set: { lots: bill.lots } });
+  }
+
+  return { modifiedLotsCount, protectedObjectIds };
+}
+
+/** Restore pre-bill rate/billAmount on lots removed from or unlinked by deleting an OwnerBill. */
+async function restoreRevertedLotsFromBill(queryFilter, bill) {
+  const prevByLotId = new Map();
+  for (const item of bill?.lots || []) {
+    if (item?.lotId && item.preBillAmount != null) {
+      prevByLotId.set(String(item.lotId), {
+        rate: Number(item.preBillRate ?? 0),
+        billAmount: Number(item.preBillAmount ?? 0),
+      });
+    }
+  }
+
+  const affectedLots = await GhausiaLot.find(queryFilter).select("_id").lean();
+  for (const l of affectedLots) {
+    const prev = prevByLotId.get(String(l._id));
+    await GhausiaLot.updateOne(
+      { _id: l._id },
+      {
+        $set: {
+          status: "received back",
+          ownerBillId: null,
+          billedInBillNo: null,
+          billedInBookNo: null,
+          ...(prev
+            ? {
+                rate: prev.rate,
+                billAmount: prev.billAmount,
+                totalAmount: prev.billAmount,
+              }
+            : {}),
+        },
+      },
+    );
+  }
+}
 
 // 1. Get bills for owner / workspace + compute next defaults
 router.get("/", async (req, res) => {
@@ -178,8 +297,9 @@ router.get("/", async (req, res) => {
       billedPaymentIds: [],
     };
 
-    if (bills.length > 0) {
-      const latest = bills[0]; // newest bill by (bookNo, billNo)
+    const finalizedBills = bills.filter((b) => b.status !== "draft");
+    if (finalizedBills.length > 0) {
+      const latest = finalizedBills[0]; // newest finalized bill by (bookNo, billNo)
       const curBook = Number(latest.bookNo || 1);
       const curBillNo = Number(latest.billNo || 1);
 
@@ -197,7 +317,7 @@ router.get("/", async (req, res) => {
 
     // Collect all payment IDs that have already been settled in existing finalized bills or legacy history
     const billedPaymentIds = new Set();
-    bills.forEach((b) => {
+    finalizedBills.forEach((b) => {
       (b.paymentsReceived || []).forEach((p) => {
         const pid = String(p.paymentId || p._id || p.id || "").trim();
         if (pid && isValidObjectId(pid)) billedPaymentIds.add(pid);
@@ -288,49 +408,28 @@ router.post("/", async (req, res) => {
     const saved = await bill.save();
     let billPaymentsUpdated = false;
 
-    // 1. Mark included lots as completed and link them to this Owner Bill (strictly per lot, preserving existing dates)
-    try {
-      let modifiedLotsCount = 0;
-      const now = new Date();
-      for (const item of saved.lots || []) {
-        const lotQuery = buildSingleLotFilter(item, userId, bizId);
-        if (!lotQuery) continue;
+    if (saved.status === "draft") {
+      emitOrgChange(req, "owner_bill", {
+        billId: String(saved._id),
+        action: "owner_bill_created",
+        adminOnly: true,
+      });
+      return res.status(201).json(normalize(saved));
+    }
 
-        const targetLots = await GhausiaLot.find(lotQuery).select(
-          "_id receivedBackDate completionApprovedAt"
-        );
-        for (const tLot of targetLots) {
-          const itemRate = Number(item.rate || 0);
-          const itemAmount = Number(item.amount || 0);
-          const setPatch = {
-            status: "completed",
-            ownerBillId: saved._id,
-            billedInBillNo: saved.billNo,
-            billedInBookNo: saved.bookNo,
-          };
-          if (!tLot.completionApprovedAt) {
-            setPatch.completionApprovedAt = now;
-          }
-          if (!tLot.receivedBackDate) {
-            setPatch.receivedBackDate = toDateOrNow(saved.date);
-          }
-          if (itemRate > 0) setPatch.rate = itemRate;
-          if (itemAmount > 0) {
-            setPatch.billAmount = itemAmount;
-            setPatch.totalAmount = itemAmount;
-          }
-          const uRes = await GhausiaLot.updateOne(
-            { _id: tLot._id },
-            { $set: setPatch }
-          );
-          modifiedLotsCount += uRes.modifiedCount || 0;
-        }
-      }
+    // 1. Mark included lots (and combined Rs 0 dupatta children) as completed & link to this Owner Bill
+    try {
+      const { modifiedLotsCount } = await markIncludedLotsForBill(
+        saved,
+        userId,
+        bizId,
+        new Date(),
+      );
       if (modifiedLotsCount > 0) {
         console.log(
           `[OwnerBill] Marked ${modifiedLotsCount} lots as completed for Bill #${saved.billNo}`
         );
-        emitOrgChange(req, "lot", { action: "lots_billed" });
+        emitOrgChange(req, "lot", { action: "lots_billed", adminOnly: true });
       }
     } catch (lotErr) {
       console.warn("Could not mark lots as completed on bill save:", lotErr);
@@ -466,10 +565,12 @@ router.post("/", async (req, res) => {
     emitOrgChange(req, "payment", {
       action: "payment_recorded",
       linkPath: "/payments",
+      adminOnly: true,
     });
     emitOrgChange(req, "owner_bill", {
       billId: String(saved._id),
       action: "owner_bill_created",
+      adminOnly: true,
     });
     const finalBill = billPaymentsUpdated
       ? await OwnerBill.findById(saved._id)
@@ -538,19 +639,25 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
 
-    // 1. Sync Lots
+    if (bill.status === "draft") {
+      emitOrgChange(req, "owner_bill", {
+        billId: String(bill._id),
+        action: "owner_bill_updated",
+        adminOnly: true,
+      });
+      return res.json(normalize(bill));
+    }
+
+    // 1. Sync Lots (mark active + combined children first so protectedObjectIds protects active children, then revert removed ones)
     try {
-      const objectActiveIds = (bill.lots || [])
-        .map((l) => String(l.lotId || l._id || l.id || "").trim())
-        .filter(isValidObjectId)
-        .map((id) => new mongoose.Types.ObjectId(id));
+      const { protectedObjectIds } = await markIncludedLotsForBill(
+        bill,
+        userId,
+        bill.businessOwnerId,
+        new Date(),
+      );
 
-      const activeLotNos = (bill.lots || [])
-        .map((l) => String(l.lotNo || l.lotNumber || "").trim())
-        .filter(Boolean);
-
-      // Revert lots previously linked to THIS bill that were removed in edit
-      await GhausiaLot.updateMany(
+      await restoreRevertedLotsFromBill(
         {
           userId,
           $and: [
@@ -565,62 +672,12 @@ router.patch("/:id", async (req, res) => {
               ],
             },
           ],
-          _id: { $nin: objectActiveIds },
-          ...(activeLotNos.length > 0
-            ? {
-                lotNo: { $nin: activeLotNos },
-                lotNumber: { $nin: activeLotNos },
-              }
-            : {}),
+          _id: { $nin: protectedObjectIds },
         },
-        {
-          $set: {
-            status: "received back",
-            ownerBillId: null,
-            billedInBillNo: null,
-            billedInBookNo: null,
-          },
-        }
+        prevBill,
       );
 
-      // Mark currently included lots as completed & sync rates/amounts
-      const now = new Date();
-      for (const item of bill.lots || []) {
-        const lotQuery = buildSingleLotFilter(
-          item,
-          userId,
-          bill.businessOwnerId
-        );
-        if (!lotQuery) continue;
-
-        const targetLots = await GhausiaLot.find(lotQuery).select(
-          "_id completionApprovedAt"
-        );
-        for (const tLot of targetLots) {
-          const itemRate = Number(item.rate || 0);
-          const itemAmount = Number(item.amount || 0);
-          const setPatch = {
-            status: "completed",
-            ownerBillId: bill._id,
-            billedInBillNo: bill.billNo,
-            billedInBookNo: bill.bookNo,
-          };
-          if (!tLot.completionApprovedAt) {
-            setPatch.completionApprovedAt = now;
-          }
-          if (itemRate > 0) setPatch.rate = itemRate;
-          if (itemAmount > 0) {
-            setPatch.billAmount = itemAmount;
-            setPatch.totalAmount = itemAmount;
-          }
-          await GhausiaLot.updateOne(
-            { _id: tLot._id },
-            { $set: setPatch }
-          );
-        }
-      }
-
-      // Sync Paid lot settlement rows for this bill
+      // Sync Paid lot settlement rows for this bill (scoped cleanly with isRework via formatLotLinkedKey)
       const activePaidLotKeys = [];
       for (const item of bill.lots || []) {
         const itemAmt = Number(item.amount || 0);
@@ -676,7 +733,7 @@ router.patch("/:id", async (req, res) => {
         linkedLot: { $nin: activePaidLotKeys },
       });
 
-      emitOrgChange(req, "lot", { action: "lots_billed" });
+      emitOrgChange(req, "lot", { action: "lots_billed", adminOnly: true });
     } catch (patchLotErr) {
       console.warn("Could not sync lots on bill patch:", patchLotErr.message);
     }
@@ -830,7 +887,7 @@ router.patch("/:id", async (req, res) => {
             note: tallyNote,
           },
         },
-        { new: true }
+        { new: true, runValidators: true }
       );
       if (!existingTally) {
         await Payment.create({
@@ -854,10 +911,12 @@ router.patch("/:id", async (req, res) => {
     emitOrgChange(req, "payment", {
       action: "payment_recorded",
       linkPath: "/payments",
+      adminOnly: true,
     });
     emitOrgChange(req, "owner_bill", {
       billId: String(bill._id),
       action: "owner_bill_updated",
+      adminOnly: true,
     });
     const finalBill = billPaymentsUpdated
       ? await OwnerBill.findById(bill._id)
@@ -941,11 +1000,12 @@ router.delete("/:id", async (req, res) => {
       );
     }
 
-    // Unlink all remaining pre-existing Received payments so they become available again
+    // Unlink all remaining pre-existing Received payments in this workspace so they become available again
     try {
       await Payment.updateMany(
         {
           userId,
+          ...bizScopeFilter(bill.businessOwnerId),
           $or: [
             { ownerBillId: bill._id },
             { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
@@ -966,9 +1026,9 @@ router.delete("/:id", async (req, res) => {
       );
     }
 
-    // Revert lots strictly linked to this bill back to 'received back' (billable)
+    // Revert lots (and pre-bill amounts) strictly linked to this bill back to 'received back' (billable)
     try {
-      await GhausiaLot.updateMany(
+      await restoreRevertedLotsFromBill(
         {
           userId,
           $and: [
@@ -984,16 +1044,9 @@ router.delete("/:id", async (req, res) => {
             },
           ],
         },
-        {
-          $set: {
-            status: "received back",
-            ownerBillId: null,
-            billedInBillNo: null,
-            billedInBookNo: null,
-          },
-        }
+        bill,
       );
-      emitOrgChange(req, "lot", { action: "lots_unbilled" });
+      emitOrgChange(req, "lot", { action: "lots_unbilled", adminOnly: true });
     } catch (revertErr) {
       console.warn("Could not revert lots on bill delete:", revertErr.message);
     }
@@ -1001,10 +1054,12 @@ router.delete("/:id", async (req, res) => {
     emitOrgChange(req, "owner_bill", {
       billId: String(bill._id),
       action: "owner_bill_deleted",
+      adminOnly: true,
     });
     emitOrgChange(req, "payment", {
       action: "payment_deleted",
       linkPath: "/payments",
+      adminOnly: true,
     });
     res.json({ message: "Bill deleted successfully" });
   } catch (error) {

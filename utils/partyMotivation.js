@@ -1,4 +1,5 @@
 const GhausiaLot = require("../models/GhausiaLot");
+const { getPartyAllBusinessLotsFilter } = require("./access");
 
 const LOOKBACK_DAYS = 90;
 
@@ -10,19 +11,26 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId, isAdminVi
   const since = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
   const now = new Date();
 
-  // Build query — match by partyId or partyName
-  const partyMatch = [];
-  const pid = String(partyId || "").trim();
-  const pname = String(partyName || "").trim();
-  if (pid) partyMatch.push({ partyId: pid });
-  if (pname) partyMatch.push({ partyName: new RegExp(`^${pname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") });
-  if (!partyMatch.length) return { messages: [], stats: {} };
+  const lotFilter = getPartyAllBusinessLotsFilter({
+    role: "party",
+    ownerId,
+    _id: ownerId,
+    partyId: String(partyId || "").trim(),
+    partyName: String(partyName || "").trim(),
+  });
+  if (lotFilter._id && lotFilter._id.$in && lotFilter._id.$in.length === 0) {
+    return { messages: [], stats: {} };
+  }
 
   const lots = await GhausiaLot.find({
-    userId: ownerId,
-    $or: partyMatch,
+    ...lotFilter,
     createdAt: { $gte: since },
   })
+    .select(
+      isAdminView
+        ? "status createdAt allotDate receivedDate completionApprovedAt receivedBackDate updatedAt billAmount"
+        : "status createdAt allotDate receivedDate completionApprovedAt receivedBackDate updatedAt",
+    )
     .sort({ createdAt: -1 })
     .lean();
 
@@ -106,11 +114,10 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId, isAdminVi
     // skip pending/dispatched — they are neither good nor bad
   }
 
-  // Total bill value completed
-  const totalBillCompleted = completedLots.reduce(
-    (s, l) => s + (Number(l.billAmount) || 0),
-    0
-  );
+  // Total admin bill value completed — exposed ONLY to admin views, never party users.
+  const totalBillCompleted = isAdminView
+    ? completedLots.reduce((s, l) => s + (Number(l.billAmount) || 0), 0)
+    : undefined;
 
   const stats = {
     totalLots,
@@ -123,7 +130,7 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId, isAdminVi
     completedLastMonth,
     rejectionRate,
     streak,
-    totalBillCompleted,
+    ...(isAdminView ? { totalBillCompleted } : {}),
   };
 
   // ── Generate Messages (max 3, prioritized) ──
@@ -257,16 +264,21 @@ async function calculatePartyMotivation({ partyId, partyName, ownerId, isAdminVi
     });
   }
 
-  // 7. High bill value
-  if (totalBillCompleted >= 100000) {
+  // 7. High bill value (Admin-only insight — never leak business lot.billAmount to party users)
+  if (isAdminView && totalBillCompleted >= 100000) {
     const formatted = `₨${Math.round(totalBillCompleted / 1000)}K`;
     encouragements.push({
       type: "encouragement",
       icon: "💰",
       title: `${formatted} ka kaam complete!`,
-      body: isAdminView 
-        ? "3 mahine mein inho ne acha business generate kia hai!" 
-        : "3 mahine mein bohat acha kaam kia hai — isi tarah lagey rahein!",
+      body: "3 mahine mein inho ne acha business generate kia hai!",
+    });
+  } else if (!isAdminView && completedCount >= 10) {
+    encouragements.push({
+      type: "encouragement",
+      icon: "🏆",
+      title: `${completedCount} lots complete!`,
+      body: "3 mahine mein bohat acha kaam kia hai — isi tarah lagey rahein!",
     });
   }
 

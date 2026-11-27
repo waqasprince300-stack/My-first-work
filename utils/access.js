@@ -22,29 +22,47 @@ const getOwnerFilter = (req) => ({ userId: getDataOwnerId(req.user) });
 const escapeRegexString = (value) =>
   String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const legacyUnlinkedNameCondition = (field, pname) => {
+  const clean = String(pname || "").trim();
+  if (!clean || clean.toLowerCase() === "owner") return null;
+  return {
+    $and: [
+      {
+        $or: [
+          { partyId: { $exists: false } },
+          { partyId: null },
+          { partyId: "" },
+        ],
+      },
+      { [field]: new RegExp(`^\\s*${escapeRegexString(clean)}\\s*$`, "i") },
+    ],
+  };
+};
+
 /**
  * Party portal: payments / lots that belong to this party across all collections.
+ * Only falls back to case-insensitive name matching on legacy records that lack a partyId.
  */
 const getPartyPaymentOrConditions = (user) => {
-  const pid = String(user.partyId || "");
+  const pid = String(user.partyId || "").trim();
   const pname = String(user.partyName || "").trim();
   const or = [];
   if (pid) or.push({ partyId: pid });
-  if (pname)
-    or.push({ party: new RegExp(`^\\s*${escapeRegexString(pname)}\\s*$`, "i") });
+  const legacyName = legacyUnlinkedNameCondition("party", pname);
+  if (legacyName) or.push(legacyName);
   if (!or.length) return [{ partyId: "__impossible_party__" }];
   return or;
 };
 
-/** Lots assigned to this party user across every business workspace (matched by partyId or party name on the lot). */
+/** Lots assigned to this party user across every business workspace (strict partyId match + unlinked legacy name fallback). */
 const getPartyAllBusinessLotsFilter = (user) => {
   const userId = getDataOwnerId(user);
   const pname = String(user.partyName || "").trim();
   const pid = String(user.partyId || "").trim();
   const or = [];
   if (pid) or.push({ partyId: pid });
-  if (pname)
-    or.push({ partyName: new RegExp(`^\\s*${escapeRegexString(pname)}\\s*$`, "i") });
+  const legacyName = legacyUnlinkedNameCondition("partyName", pname);
+  if (legacyName) or.push(legacyName);
   if (!or.length) return { userId, _id: { $in: [] } };
   return { userId, $or: or };
 };
@@ -169,167 +187,106 @@ const ensureDefaultBusinessOwner = async (user) => {
   return owner;
 };
 
-const resolveBusinessOwner = async (req, res, next) => {
-  try {
-    const userId = getDataOwnerId(req.user);
+const createBusinessOwnerResolver =
+  ({ allowMissing = false, allowArchivedOnRead = false } = {}) =>
+  async (req, res, next) => {
+    try {
+      const userId = getDataOwnerId(req.user);
 
-    if (isParty(req.user)) {
-      const headerBiz = (req.headers["x-business-owner-id"] || "")
-        .toString()
-        .trim();
-      if (headerBiz && !mongoose.Types.ObjectId.isValid(headerBiz)) {
-        return res.status(400).json({ message: "Invalid business owner id" });
+      if (isParty(req.user)) {
+        const headerBiz = (req.headers["x-business-owner-id"] || "")
+          .toString()
+          .trim();
+        if (headerBiz && !mongoose.Types.ObjectId.isValid(headerBiz)) {
+          return res.status(400).json({ message: "Invalid business owner id" });
+        }
+        req.businessOwnerId =
+          headerBiz ||
+          String(
+            req.user.businessOwnerId != null ? req.user.businessOwnerId : "",
+          ).trim();
+        return next();
       }
-      req.businessOwnerId =
-        headerBiz ||
-        String(
-          req.user.businessOwnerId != null ? req.user.businessOwnerId : "",
-        ).trim();
-      return next();
-    }
 
-    const requestedOwnerId =
-      req.headers["x-business-owner-id"] || req.query.businessOwnerId;
-    let owner = null;
+      const requestedOwnerId =
+        req.headers["x-business-owner-id"] || req.query.businessOwnerId;
+      let owner = null;
 
-    if (requestedOwnerId) {
-      const cleanRequestedId = String(requestedOwnerId).trim();
-      if (!mongoose.Types.ObjectId.isValid(cleanRequestedId)) {
-        return res.status(400).json({ message: "Invalid business owner id" });
+      if (requestedOwnerId) {
+        const cleanRequestedId = String(requestedOwnerId).trim();
+        if (!mongoose.Types.ObjectId.isValid(cleanRequestedId)) {
+          return res.status(400).json({ message: "Invalid business owner id" });
+        }
+        const allowArchived =
+          allowArchivedOnRead &&
+          (req.method === "GET" || req.method === "HEAD");
+        const cacheKey = `${userId}:${cleanRequestedId}${allowArchived ? ":any" : ""}`;
+        owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+        if (!owner) {
+          const query = {
+            _id: cleanRequestedId,
+            userId,
+            ...(allowArchived ? {} : { status: "active", deletedAt: null }),
+          };
+          owner = await BusinessOwner.findOne(query).lean();
+          if (owner) {
+            setCached(
+              BUSINESS_OWNER_CACHE,
+              cacheKey,
+              owner,
+              BUSINESS_OWNER_TTL_MS,
+            );
+          }
+        }
+        if (!owner) {
+          return res.status(404).json({ message: "Business owner not found" });
+        }
+        req.businessOwnerId = String(owner._id);
+      } else {
+        const cacheKey = `${userId}:default`;
+        owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
+        if (!owner) {
+          owner = await ensureDefaultBusinessOwner(req.user);
+          if (owner) {
+            setCached(
+              BUSINESS_OWNER_CACHE,
+              cacheKey,
+              owner,
+              BUSINESS_OWNER_TTL_MS,
+            );
+          }
+        }
+        if (!owner) {
+          if (allowMissing) {
+            req.businessOwnerId = null;
+            return next();
+          }
+          return res.status(400).json({
+            message:
+              "Create a business workspace first. Open Work Spaces (Ghausia) and add a collection name before using this feature.",
+            code: "NO_BUSINESS_OWNER",
+          });
+        }
+        req.businessOwnerId = String(owner._id);
       }
-      const cacheKey = `${userId}:${cleanRequestedId}`;
-      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
-      if (!owner) {
-        owner = await BusinessOwner.findOne({
-          _id: cleanRequestedId,
-          userId,
-          status: "active",
-          deletedAt: null,
-        }).lean();
-        if (owner)
-          setCached(
-            BUSINESS_OWNER_CACHE,
-            cacheKey,
-            owner,
-            BUSINESS_OWNER_TTL_MS,
-          );
-      }
-      if (!owner) {
-        return res.status(404).json({ message: "Business owner not found" });
-      }
-    } else {
-      const cacheKey = `${userId}:default`;
-      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
-      if (!owner) {
-        owner = await ensureDefaultBusinessOwner(req.user);
-        if (owner)
-          setCached(
-            BUSINESS_OWNER_CACHE,
-            cacheKey,
-            owner,
-            BUSINESS_OWNER_TTL_MS,
-          );
-      }
-      if (!owner) {
-        return res.status(400).json({
-          message:
-            "Create a business workspace first. Open Work Spaces (Ghausia) and add a collection name before using this feature.",
-          code: "NO_BUSINESS_OWNER",
-        });
-      }
-    }
 
-    req.businessOwnerId = String(owner._id);
-    next();
-  } catch (error) {
-    res
-      .status(500)
-      .json({
+      next();
+    } catch (error) {
+      res.status(500).json({
         message: "Error resolving business owner",
         error: error.message,
       });
-  }
-};
-
-/**
- * Tenant admin: same as resolveBusinessOwner when a workspace exists or is requested via header.
- * If there is no BusinessOwner yet, sets req.businessOwnerId to null and continues (e.g. parties before first workspace).
- * Party JWT behavior matches resolveBusinessOwner.
- */
-const resolveBusinessOwnerAllowMissing = async (req, res, next) => {
-  try {
-    const userId = getDataOwnerId(req.user);
-
-    if (isParty(req.user)) {
-      const headerBiz = (req.headers["x-business-owner-id"] || "")
-        .toString()
-        .trim();
-      if (headerBiz && !mongoose.Types.ObjectId.isValid(headerBiz)) {
-        return res.status(400).json({ message: "Invalid business owner id" });
-      }
-      req.businessOwnerId =
-        headerBiz ||
-        String(
-          req.user.businessOwnerId != null ? req.user.businessOwnerId : "",
-        ).trim();
-      return next();
     }
+  };
 
-    const requestedOwnerId =
-      req.headers["x-business-owner-id"] || req.query.businessOwnerId;
-    let owner = null;
-
-    if (requestedOwnerId) {
-      const cleanRequestedId = String(requestedOwnerId).trim();
-      if (!mongoose.Types.ObjectId.isValid(cleanRequestedId)) {
-        return res.status(400).json({ message: "Invalid business owner id" });
-      }
-      const cacheKey = `${userId}:${cleanRequestedId}`;
-      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
-      if (!owner) {
-        owner = await BusinessOwner.findOne({
-          _id: cleanRequestedId,
-          userId,
-          status: "active",
-          deletedAt: null,
-        }).lean();
-        if (owner)
-          setCached(
-            BUSINESS_OWNER_CACHE,
-            cacheKey,
-            owner,
-            BUSINESS_OWNER_TTL_MS,
-          );
-      }
-      if (!owner) {
-        return res.status(404).json({ message: "Business owner not found" });
-      }
-      req.businessOwnerId = String(owner._id);
-    } else {
-      const cacheKey = `${userId}:default`;
-      owner = getCached(BUSINESS_OWNER_CACHE, cacheKey);
-      if (!owner) {
-        owner = await ensureDefaultBusinessOwner(req.user);
-        if (owner)
-          setCached(
-            BUSINESS_OWNER_CACHE,
-            cacheKey,
-            owner,
-            BUSINESS_OWNER_TTL_MS,
-          );
-      }
-      req.businessOwnerId = owner ? String(owner._id) : null;
-    }
-    next();
-  } catch (error) {
-    res
-      .status(500)
-      .json({
-        message: "Error resolving business owner",
-        error: error.message,
-      });
-  }
-};
+const resolveBusinessOwner = createBusinessOwnerResolver();
+const resolveBusinessOwnerAllowMissing = createBusinessOwnerResolver({
+  allowMissing: true,
+});
+const resolveBusinessOwnerAllowArchivedRead = createBusinessOwnerResolver({
+  allowMissing: true,
+  allowArchivedOnRead: true,
+});
 
 const requireAdminUser = (req, res) => {
   if (!isTenantAdmin(req.user)) {
@@ -370,6 +327,77 @@ const stripPrivateLotFieldsForParty = (doc) => {
   for (const field of PRIVATE_ADMIN_LOT_FIELDS) {
     delete plain[field];
   }
+  return plain;
+};
+
+/** Remove admin-internal bill tracking fields from PartyEdit docs before returning to party users. */
+const stripPrivatePartyEditFieldsForParty = (doc) => {
+  if (!doc || typeof doc !== "object") return doc;
+  const plain =
+    typeof doc.toObject === "function" ? doc.toObject({ virtuals: true }) : { ...doc };
+  delete plain.amountChangeNote;
+  delete plain.ghausiaAmount;
+  if (plain.pendingRevision && typeof plain.pendingRevision === "object") {
+    const rev = { ...plain.pendingRevision };
+    delete rev.ghausiaAmount;
+    plain.pendingRevision = rev;
+  }
+  return plain;
+};
+
+/** Remove internal owner-bill linkage metadata from Payment docs before returning to party users. */
+const stripPrivatePaymentFieldsForParty = (doc) => {
+  if (!doc || typeof doc !== "object") return doc;
+  const plain =
+    typeof doc.toObject === "function" ? doc.toObject({ virtuals: true }) : { ...doc };
+  delete plain.ownerBillId;
+  delete plain.billedInBillNo;
+  delete plain.billedInBookNo;
+  delete plain.isBillManualCash;
+  delete plain.isLegacySettled;
+  return plain;
+};
+
+/** Resolve the party-visible workspace name according to showWorkspace / workspaceAlias / workspaceOverrides. */
+const resolvePartyWorkspaceLabel = (businessOwnerId, realName, partyDoc) => {
+  const real = String(realName || "").trim();
+  if (!partyDoc || typeof partyDoc !== "object") return real;
+  const bizIdStr = String(businessOwnerId || "").trim();
+  const globalAlias = String(partyDoc.workspaceAlias || "").trim();
+  const overrides = Array.isArray(partyDoc.workspaceOverrides)
+    ? partyDoc.workspaceOverrides
+    : [];
+  const ov = bizIdStr
+    ? overrides.find(
+        (o) => String(o?.businessOwnerId || "").trim() === bizIdStr,
+      )
+    : null;
+
+  if (ov) {
+    if (ov.showWorkspace !== false && String(ov.alias || "").trim()) {
+      return String(ov.alias).trim();
+    }
+    if (ov.showWorkspace === false) {
+      return globalAlias;
+    }
+  }
+  if (partyDoc.showWorkspace === false) {
+    return globalAlias;
+  }
+  if (globalAlias) {
+    return globalAlias;
+  }
+  return real;
+};
+
+/** Keep only party-safe identity and workspace-visibility settings when serving Party docs to a party user. */
+const sanitizePartyForParty = (doc) => {
+  if (!doc || typeof doc !== "object") return doc;
+  const plain =
+    typeof doc.toObject === "function" ? doc.toObject({ virtuals: true }) : { ...doc };
+  delete plain.totalDue;
+  delete plain.totalPaid;
+  delete plain.notes;
   return plain;
 };
 
@@ -414,7 +442,12 @@ module.exports = {
   requireAdminUser,
   resolveBusinessOwner,
   resolveBusinessOwnerAllowMissing,
+  resolveBusinessOwnerAllowArchivedRead,
   stripPrivateLotFieldsForParty,
+  stripPrivatePartyEditFieldsForParty,
+  stripPrivatePaymentFieldsForParty,
+  resolvePartyWorkspaceLabel,
+  sanitizePartyForParty,
   toAggregateObjectIdMatch,
   toObjectId,
   validateObjectIdParam,

@@ -9,9 +9,11 @@ const {
   getDataOwnerId,
   isParty,
   requireAdminUser,
+  sanitizePartyForParty,
   validateObjectIdParam,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
+const { disconnectUserSockets } = require("../utils/realtime");
 
 router.param("id", validateObjectIdParam);
 
@@ -51,7 +53,7 @@ router.get("/", async (req, res) => {
     }
 
     const parties = await Party.find(filter).sort(sort).lean();
-    res.json(parties);
+    res.json(isParty(req.user) ? parties.map(sanitizePartyForParty) : parties);
   } catch (error) {
     res
       .status(500)
@@ -59,13 +61,12 @@ router.get("/", async (req, res) => {
   }
 });
 
-// Get deleted parties (trash)
+// Get deleted parties (trash — Admin only)
 router.get("/trash", async (req, res) => {
   try {
-    const filter = isParty(req.user)
-      ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: { $ne: null } }
-      : { userId: getDataOwnerId(req.user), deletedAt: { $ne: null } };
-    
+    if (!requireAdminUser(req, res)) return;
+    const filter = { userId: getDataOwnerId(req.user), deletedAt: { $ne: null } };
+
     const parties = await Party.find(filter).sort({ deletedAt: -1 }).lean();
     res.json(parties);
   } catch (error) {
@@ -78,6 +79,12 @@ router.get("/trash", async (req, res) => {
 // Get single party
 router.get("/:id", async (req, res) => {
   try {
+    if (isParty(req.user)) {
+      const pid = String(req.user.partyId || "").trim();
+      if (!pid || !require("mongoose").Types.ObjectId.isValid(pid)) {
+        return res.status(404).json({ message: "Party not found" });
+      }
+    }
     const filter = isParty(req.user)
       ? { userId: getDataOwnerId(req.user), _id: req.user.partyId, deletedAt: null }
       : { userId: getDataOwnerId(req.user), _id: req.params.id, deletedAt: null };
@@ -86,7 +93,7 @@ router.get("/:id", async (req, res) => {
       return res.status(404).json({ message: "Party not found" });
     }
     require("../utils/requestCache").clearCache("bootstrap");
-    res.json(party);
+    res.json(isParty(req.user) ? sanitizePartyForParty(party) : party);
   } catch (error) {
     res
       .status(500)
@@ -122,13 +129,44 @@ router.post("/", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const ownerUserId = getDataOwnerId(req.user);
+    const existing = await Party.findOne({
+      _id: req.params.id,
+      userId: ownerUserId,
+      deletedAt: null,
+    })
+      .select("name")
+      .lean();
+    if (!existing) {
+      return res.status(404).json({ message: "Party not found" });
+    }
     const party = await Party.findOneAndUpdate(
-      { _id: req.params.id, userId: getDataOwnerId(req.user), deletedAt: null },
+      { _id: req.params.id, userId: ownerUserId, deletedAt: null },
       stripOwnership(req.body),
       { new: true, runValidators: true },
     );
     if (!party) {
       return res.status(404).json({ message: "Party not found" });
+    }
+    if (existing.name !== party.name) {
+      const User = require("../models/User");
+      const { invalidateAuthUserCache } = require("../middleware/auth");
+      const linkedUsers = await User.find({
+        role: "party",
+        ownerId: ownerUserId,
+        partyId: String(party._id),
+      })
+        .select("_id")
+        .lean();
+      if (linkedUsers.length > 0) {
+        await User.updateMany(
+          { _id: { $in: linkedUsers.map((u) => u._id) } },
+          { $set: { partyName: party.name } },
+        );
+        for (const u of linkedUsers) {
+          invalidateAuthUserCache(u._id);
+        }
+      }
     }
     require("../utils/requestCache").clearCache("bootstrap");
     res.json(party);
@@ -173,6 +211,7 @@ router.delete("/:id", async (req, res) => {
 
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
+      disconnectUserSockets(req.io, u._id);
     }
     require("../utils/requestCache").clearCache("bootstrap");
 
@@ -269,6 +308,7 @@ router.delete("/:id/permanent", async (req, res) => {
 
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
+      disconnectUserSockets(req.io, u._id);
     }
     require("../utils/requestCache").clearCache("bootstrap");
 

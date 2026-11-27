@@ -173,22 +173,26 @@ async function findPartyUsersByRef({ ownerId, partyId, partyName }) {
   if (!pid && !pname) return [];
   if (pname.toLowerCase() === "owner") return [];
 
-  const or = [];
-  if (pid) or.push({ partyId: pid });
-  if (pname) {
-    or.push({
-      partyName: new RegExp(
-        `^${pname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        "i",
-      ),
-    });
-  }
+  // Match strictly by partyId when known; fall back to case-insensitive partyName only for legacy unlinked refs.
+  const identityFilter = pid
+    ? { partyId: pid }
+    : {
+        $and: [
+          { $or: [{ partyId: { $exists: false } }, { partyId: null }, { partyId: "" }] },
+          {
+            partyName: new RegExp(
+              `^${pname.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+              "i",
+            ),
+          },
+        ],
+      };
 
   return User.find({
     role: "party",
     status: "approved",
     $or: [{ ownerId: oid }, { approvedBy: oid }],
-    $and: [{ $or: or }],
+    $and: [identityFilter],
   })
     .select("name email partyId partyName")
     .lean();

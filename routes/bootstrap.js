@@ -14,6 +14,11 @@ const {
   getBusinessOwnerFilter,
   isParty,
   isTenantAdmin,
+  resolvePartyWorkspaceLabel,
+  sanitizePartyForParty,
+  stripPrivateLotFieldsForParty,
+  stripPrivatePartyEditFieldsForParty,
+  stripPrivatePaymentFieldsForParty,
   toAggregateObjectIdMatch,
 } = require("../utils/access");
 
@@ -379,17 +384,7 @@ router.get("/", async (req, res) => {
     }
 
     if (isParty(req.user)) {
-      const [workspaceLotIds, crossLotIds, tenantOwners] = await Promise.all([
-        partyAllowedLotIds(req, false),
-        partyAllowedLotIds(req, true),
-        BusinessOwner.find({ userId: getDataOwnerId(req.user) }).lean(),
-      ]);
-      const ownerNameMap = new Map(
-        tenantOwners.map((owner) => [String(owner._id), owner.name]),
-      );
-
       const mongoose = require("mongoose");
-      const { stripPrivateLotFieldsForParty } = require("../utils/access");
       const validPartyObjId =
         req.user.partyId &&
         mongoose.Types.ObjectId.isValid(String(req.user.partyId).trim())
@@ -405,29 +400,47 @@ router.get("/", async (req, res) => {
             .lean()
         : Promise.resolve([]);
 
-      if (minimal) {
-        const [
-          parties,
-          partyCrossLots,
-          partyCrossPayments,
-          partyCrossPartyEdits,
-        ] = await Promise.all([
+      const [workspaceLotIds, crossLotIds, tenantOwners, rawParties] =
+        await Promise.all([
+          partyAllowedLotIds(req, false),
+          partyAllowedLotIds(req, true),
+          BusinessOwner.find({ userId: getDataOwnerId(req.user) }).lean(),
           partyDocPromise,
-          fetchGhausiaLots(
-            req,
-            { scopeAll: false, partyScopeAll: true },
-            ownerNameMap,
-          ),
-          fetchPayments(req, { scopeAll: false, partyScopeAll: true }),
-          fetchPartyEdits(
-            req,
-            { scopeAll: false, partyScopeAll: true },
-            receiptSelect,
-            crossLotIds,
-          ),
         ]);
 
+      const primaryPartyDoc = rawParties[0] || null;
+      const parties = rawParties.map(sanitizePartyForParty);
+      const ownerNameMap = new Map(
+        tenantOwners.map((owner) => [
+          String(owner._id),
+          resolvePartyWorkspaceLabel(owner._id, owner.name, primaryPartyDoc),
+        ]),
+      );
+
+      if (minimal) {
+        const [partyCrossLots, partyCrossPayments, partyCrossPartyEdits] =
+          await Promise.all([
+            fetchGhausiaLots(
+              req,
+              { scopeAll: false, partyScopeAll: true },
+              ownerNameMap,
+            ),
+            fetchPayments(req, { scopeAll: false, partyScopeAll: true }),
+            fetchPartyEdits(
+              req,
+              { scopeAll: false, partyScopeAll: true },
+              receiptSelect,
+              crossLotIds,
+            ),
+          ]);
+
         const safeCrossLots = partyCrossLots.map(stripPrivateLotFieldsForParty);
+        const safeCrossPayments = partyCrossPayments.map(
+          stripPrivatePaymentFieldsForParty,
+        );
+        const safeCrossEdits = partyCrossPartyEdits.map(
+          stripPrivatePartyEditFieldsForParty,
+        );
         return res.json({
           parties,
           businessOwners: partyBusinessOwnersFromLots(
@@ -436,14 +449,13 @@ router.get("/", async (req, res) => {
           ),
           partyCross: {
             lots: safeCrossLots,
-            payments: partyCrossPayments,
-            partyEdits: partyCrossPartyEdits,
+            payments: safeCrossPayments,
+            partyEdits: safeCrossEdits,
           },
         });
       }
 
       const [
-        parties,
         ghausiaLots,
         payments,
         partyEdits,
@@ -451,7 +463,6 @@ router.get("/", async (req, res) => {
         partyCrossPayments,
         partyCrossPartyEdits,
       ] = await Promise.all([
-        partyDocPromise,
         fetchGhausiaLots(
           req,
           { scopeAll: false, partyScopeAll: false },
@@ -487,12 +498,14 @@ router.get("/", async (req, res) => {
           ownerNameMap,
         ),
         ghausiaLots: safeWorkspaceLots,
-        payments,
-        partyEdits,
+        payments: payments.map(stripPrivatePaymentFieldsForParty),
+        partyEdits: partyEdits.map(stripPrivatePartyEditFieldsForParty),
         partyCross: {
           lots: safeCrossLots,
-          payments: partyCrossPayments,
-          partyEdits: partyCrossPartyEdits,
+          payments: partyCrossPayments.map(stripPrivatePaymentFieldsForParty),
+          partyEdits: partyCrossPartyEdits.map(
+            stripPrivatePartyEditFieldsForParty,
+          ),
         },
       });
     }

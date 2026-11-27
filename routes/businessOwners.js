@@ -5,6 +5,7 @@ const PartyEdit = require("../models/PartyEdit");
 const PartyLedger = require("../models/PartyLedger");
 const Payment = require("../models/Payment");
 const GhausiaLot = require("../models/GhausiaLot");
+const OwnerBill = require("../models/OwnerBill");
 const Party = require("../models/Party");
 const Collection = require("../models/Collection");
 const RateCalculation = require("../models/RateCalculation");
@@ -277,6 +278,7 @@ router.delete("/:id/permanent", async (req, res) => {
         ghausiaLots,
         parties,
         collections,
+        ownerBills,
         rateCalculations,
         savedDesigns,
         partyUsers,
@@ -287,6 +289,7 @@ router.delete("/:id/permanent", async (req, res) => {
         GhausiaLot.countDocuments(workspaceFilter),
         Party.countDocuments(workspaceFilter),
         Collection.countDocuments(workspaceFilter),
+        OwnerBill.countDocuments(workspaceFilter),
         RateCalculation.countDocuments(workspaceFilter),
         SavedDesign.countDocuments(workspaceFilter),
         User.countDocuments({
@@ -302,6 +305,7 @@ router.delete("/:id/permanent", async (req, res) => {
         ghausiaLots,
         parties,
         collections,
+        ownerBills,
         rateCalculations,
         savedDesigns,
         partyUsers,
@@ -330,6 +334,7 @@ router.delete("/:id/permanent", async (req, res) => {
         { $pull: { workspaceOverrides: { businessOwnerId: String(bid) } } }
       ),
       Collection.deleteMany(workspaceFilter),
+      OwnerBill.deleteMany(workspaceFilter),
       RateCalculation.deleteMany(workspaceFilter),
       SavedDesign.deleteMany(workspaceFilter),
     ]);

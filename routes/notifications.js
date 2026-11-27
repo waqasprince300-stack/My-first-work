@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const Notification = require("../models/Notification");
 const Announcement = require("../models/Announcement");
-const { resolveBusinessOwner, getDataOwnerId, isParty, isTenantAdmin } = require("../utils/access");
+const { getDataOwnerId, isParty, isTenantAdmin } = require("../utils/access");
 const { emitOrgChange } = require("../utils/realtime");
 const Party = require("../models/Party");
 const { calculatePartyMotivation, calculateAllPartiesMotivation } = require("../utils/partyMotivation");
@@ -224,13 +224,15 @@ router.post("/broadcast", async (req, res) => {
 
     await announcement.save();
 
-    // Broadcast via socket to everyone in the org room
+    // Broadcast via socket ONLY to admin room and matching target party (or allPartiesRoom for "all")
+    const serialized = serialize(announcement);
     emitOrgChange(req, "broadcast", {
       action: "admin_broadcast_start",
-      ...serialize(announcement)
+      broadcastTargetPartyId: announcement.targetPartyId || "all",
+      ...serialized,
     });
 
-    res.status(201).json(serialize(announcement));
+    res.status(201).json(serialized);
   } catch (error) {
     res.status(500).json({ message: "Error creating broadcast", error: error.message });
   }
@@ -256,16 +258,12 @@ router.get("/active-broadcasts", async (req, res) => {
       ]
     };
 
-    if (partyId) {
-      query.$and = [
-        timeCondition,
-        {
-          $or: [
-            { targetPartyId: "all" },
-            { targetPartyId: String(partyId) }
-          ]
-        }
-      ];
+    if (isParty(req.user)) {
+      const partyTargets = [{ targetPartyId: "all" }];
+      if (partyId) {
+        partyTargets.push({ targetPartyId: String(partyId) });
+      }
+      query.$and = [timeCondition, { $or: partyTargets }];
     } else {
       query.$or = timeCondition.$or;
     }
@@ -296,6 +294,7 @@ router.put("/broadcast/:id/stop", async (req, res) => {
 
     emitOrgChange(req, "broadcast", {
       action: "admin_broadcast_stop",
+      broadcastTargetPartyId: announcement.targetPartyId || "all",
       id: announcement.id
     });
 

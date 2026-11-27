@@ -1,9 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const GhausiaLot = require("../models/GhausiaLot");
+const OwnerBill = require("../models/OwnerBill");
 const Party = require("../models/Party");
 const PartyLedger = require("../models/PartyLedger");
 const PartyEdit = require("../models/PartyEdit");
+const Payment = require("../models/Payment");
 const Notification = require("../models/Notification");
 const {
   getDataOwnerId,
@@ -14,6 +16,7 @@ const {
   isParty,
   requireAdminUser,
   isTenantAdmin,
+  resolvePartyWorkspaceLabel,
   stripPrivateLotFieldsForParty,
   toObjectId,
   validateObjectIdParam,
@@ -160,6 +163,21 @@ const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
   const dispatchDate = toDateOrNull(payload.dispatchDate);
   const receivedBackDate = toDateOrNull(payload.receivedBackDate);
   const status = normalizeStatus(payload.status || "pending");
+  const now = new Date();
+  const dispatchedAt =
+    status === "dispatched"
+      ? toDateOrNull(payload.dispatchedAt) || now
+      : null;
+  const resolvedDispatchDate =
+    dispatchDate || (status === "dispatched" ? allotDate || now : null);
+  const pendingReviewSubmittedAt =
+    status === "pending approval"
+      ? toDateOrNull(payload.pendingReviewSubmittedAt) || now
+      : null;
+  const completionApprovedAt =
+    status === "received back" || status === "completed"
+      ? toDateOrNull(payload.completionApprovedAt) || now
+      : null;
   const notes = payload.description || payload.notes || "";
   const partyId = payload.partyId ? String(payload.partyId) : "";
   const partyName = await resolvePartyName(
@@ -189,8 +207,11 @@ const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
     billAmount,
     totalAmount,
     receivedDate: allotDate,
-    dispatchDate: dispatchDate ? dispatchDate : null,
+    dispatchDate: resolvedDispatchDate,
+    dispatchedAt,
     receivedBackDate: receivedBackDate ? receivedBackDate : null,
+    pendingReviewSubmittedAt,
+    completionApprovedAt,
     status,
     notes,
     suitType: payload.suitType || "2-piece",
@@ -345,7 +366,6 @@ const normalizeLotUpdatePayload = async (payload, userId) => {
 
 const clearPartyOwnedEditFields = async ({
   userId,
-  businessOwnerId,
   lotId,
 }) => {
   const lotIdStr = String(lotId || "").trim();
@@ -353,7 +373,6 @@ const clearPartyOwnedEditFields = async ({
   await PartyEdit.updateMany(
     {
       userId,
-      ...(businessOwnerId ? { businessOwnerId } : {}),
       lotId: lotIdStr,
     },
     {
@@ -381,9 +400,9 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
 
   if (!lot.partyId) {
     if (lotIdStr && lotIdStr !== "undefined") {
-      await PartyLedger.deleteMany({ userId, businessOwnerId, lotId: lotIdStr });
+      await PartyLedger.deleteMany({ userId, lotId: lotIdStr });
       // Scrub only party-owned submission fields so admin notes/voice instructions remain intact.
-      await clearPartyOwnedEditFields({ userId, businessOwnerId, lotId: lotIdStr });
+      await clearPartyOwnedEditFields({ userId, lotId: lotIdStr });
     }
     return;
   }
@@ -397,17 +416,16 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     "rejected",
   ];
   const ls = normalizeStatus(lot.status);
-  
+
   if (!synced.includes(ls)) {
     // If status is changed to something like 'pending' that shouldn't be in the ledger,
     // remove the ledger entry and clear overrideStatus while preserving notes/media.
-    await PartyLedger.deleteOne({
+    await PartyLedger.deleteMany({
       userId,
-      businessOwnerId,
       lotId: String(lot.id || lot._id || lot.lotNumber),
     });
-    await PartyEdit.updateOne(
-      { userId, businessOwnerId, lotId: String(lot.id || lot._id || lot.lotNumber) },
+    await PartyEdit.updateMany(
+      { userId, lotId: String(lot.id || lot._id || lot.lotNumber) },
       { $set: { overrideStatus: "" } }
     );
     return;
@@ -440,7 +458,7 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
     businessOwnerId,
     lotId: entryData.lotId,
   });
-  
+
   if (existing) {
     const reassigned = String(existing.partyId || "") !== String(entryData.partyId || "");
     if (reassigned) {
@@ -450,10 +468,10 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
 
     Object.assign(existing, entryData);
     await existing.save();
-    
+
     if (!reassigned) {
-      await PartyEdit.updateOne(
-        { userId, businessOwnerId, lotId: String(entryData.lotId) },
+      await PartyEdit.updateMany(
+        { userId, lotId: String(entryData.lotId) },
         { $set: { overrideStatus: "" } }
       );
     }
@@ -462,13 +480,13 @@ const syncPartyLedgerForLot = async (lot, userId, businessOwnerId) => {
 
   const newEntry = new PartyLedger(entryData);
   await newEntry.save();
-  
+
   // Also clear any overrideStatus in PartyEdit to ensure the main lot status takes precedence
-  await PartyEdit.updateOne(
-    { userId, businessOwnerId, lotId: String(entryData.lotId) },
+  await PartyEdit.updateMany(
+    { userId, lotId: String(entryData.lotId) },
     { $set: { overrideStatus: "" } }
   );
-  
+
   return newEntry;
 };
 
@@ -545,18 +563,6 @@ router.post("/:id/approve-completion", async (req, res) => {
     }
 
     const skipBillable = Boolean(req.body?.skipBillable);
-    
-    const fallbackRecDate = new Date();
-    if (skipBillable) {
-      lot.status = "completed";
-      if (!lot.receivedBackDate) lot.receivedBackDate = fallbackRecDate;
-    } else {
-      lot.status = "received back";
-      if (!lot.receivedBackDate) lot.receivedBackDate = fallbackRecDate;
-    }
-    
-    lot.rejectionNote = "";
-    lot.completionApprovedAt = new Date();
 
     const lotIdStr = String(lot._id);
     let peDoc = await PartyEdit.findOne({
@@ -567,6 +573,24 @@ router.post("/:id/approve-completion", async (req, res) => {
     if (!peDoc) {
       peDoc = await PartyEdit.findOne({ lotId: lotIdStr, userId });
     }
+
+    const fallbackRecDate = new Date();
+    const partySubmittedAnchor =
+      toDateOrNull(peDoc?.completeDate) ||
+      lot.receivedBackDate ||
+      lot.pendingReviewSubmittedAt ||
+      fallbackRecDate;
+
+    if (skipBillable) {
+      lot.status = "completed";
+      if (!lot.receivedBackDate) lot.receivedBackDate = partySubmittedAnchor;
+    } else {
+      lot.status = "received back";
+      if (!lot.receivedBackDate) lot.receivedBackDate = partySubmittedAnchor;
+    }
+
+    lot.rejectionNote = "";
+    lot.completionApprovedAt = new Date();
 
     const ownerBillingChoice = String(
       req.body?.ownerBillingChoice || "",
@@ -585,10 +609,9 @@ router.post("/:id/approve-completion", async (req, res) => {
       const fromA = Number(peDoc.pendingRevision.fromAmount ?? 0);
       const toA = Number(peDoc.pendingRevision.toAmount ?? 0);
       const delta = toA - fromA;
-      if (delta > 0) {
-        lot.billAmount = delta;
-        lot.totalAmount = delta;
-      }
+      const adjusted = Math.max(0, Number(lot.billAmount || 0) + delta);
+      lot.billAmount = adjusted;
+      lot.totalAmount = adjusted;
     }
 
     await lot.save();
@@ -597,15 +620,15 @@ router.post("/:id/approve-completion", async (req, res) => {
       peDoc
         ? { _id: peDoc._id }
         : {
-            lotId: lotIdStr,
-            userId,
-            businessOwnerId: lot.businessOwnerId,
-          },
+          lotId: lotIdStr,
+          userId,
+          businessOwnerId: lot.businessOwnerId,
+        },
       {
         $set: {
           businessOwnerId: lot.businessOwnerId,
           overrideStatus: "Completed",
-          completeDate: peDoc?.completeDate || lot.receivedBackDate || new Date(),
+          completeDate: peDoc?.completeDate || lot.receivedBackDate || partySubmittedAnchor,
         },
         $setOnInsert: {
           lotId: lotIdStr,
@@ -622,7 +645,13 @@ router.post("/:id/approve-completion", async (req, res) => {
       userId,
       lot.businessOwnerId,
     );
-    emitOrgChange(req, "lot", { lotId: String(lot._id), action: "lot_approved", linkPath: `/party-ledger?lotId=${String(lot._id)}` });
+    emitOrgChange(req, "lot", {
+      lotId: String(lot._id),
+      action: "lot_approved",
+      partyId: String(lot.partyId || ""),
+      adminOnly: !lot.partyId,
+      linkPath: `/party-ledger?lotId=${String(lot._id)}`,
+    });
     res.json(lot);
     void notifyLotApproved({ lot: lot.toObject({ virtuals: true }), ownerId: userId });
     void Notification.updateMany(
@@ -637,7 +666,7 @@ router.post("/:id/approve-completion", async (req, res) => {
           category: "review_lots",
         });
       }
-    }).catch(() => {});
+    }).catch(() => { });
   } catch (error) {
     res
       .status(400)
@@ -690,10 +719,10 @@ router.post("/:id/reject-completion", async (req, res) => {
       existingRejPe
         ? { _id: existingRejPe._id }
         : {
-            lotId: lotIdStr,
-            userId,
-            businessOwnerId: lot.businessOwnerId,
-          },
+          lotId: lotIdStr,
+          userId,
+          businessOwnerId: lot.businessOwnerId,
+        },
       {
         $set: {
           businessOwnerId: lot.businessOwnerId,
@@ -719,6 +748,7 @@ router.post("/:id/reject-completion", async (req, res) => {
       lotId: String(lot._id),
       action: "lot_rejected",
       partyId: String(lot.partyId || ""),
+      adminOnly: !lot.partyId,
       linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
     });
     res.json(lot);
@@ -735,7 +765,7 @@ router.post("/:id/reject-completion", async (req, res) => {
           category: "review_lots",
         });
       }
-    }).catch(() => {});
+    }).catch(() => { });
   } catch (error) {
     res
       .status(400)
@@ -756,7 +786,26 @@ router.get("/:id", async (req, res) => {
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
     }
-    res.json(isParty(req.user) ? stripPrivateLotFieldsForParty(lot) : lot);
+    if (isParty(req.user)) {
+      const stripped = stripPrivateLotFieldsForParty(lot);
+      if (stripped.businessOwnerId && typeof stripped.businessOwnerId === "object") {
+        const pid = String(req.user.partyId || "").trim();
+        const partyDoc =
+          pid && require("mongoose").Types.ObjectId.isValid(pid)
+            ? await Party.findOne({ _id: pid, userId: getDataOwnerId(req.user) }).lean()
+            : null;
+        stripped.businessOwnerId = {
+          ...stripped.businessOwnerId,
+          name: resolvePartyWorkspaceLabel(
+            stripped.businessOwnerId._id,
+            stripped.businessOwnerId.name,
+            partyDoc,
+          ),
+        };
+      }
+      return res.json(stripped);
+    }
+    res.json(lot);
   } catch (error) {
     res
       .status(500)
@@ -784,7 +833,7 @@ router.post("/", async (req, res) => {
     }
 
     const { dupattaDetails, ownerBillingChoice, ...mainBody } = req.body;
-    
+
     // Normalize main lot
     const payload = await normalizeLotPayload(
       stripOwnership(mainBody),
@@ -799,7 +848,7 @@ router.post("/", async (req, res) => {
       payload.lotNumber = formattedLotNum;
       payload.lotNo = formattedLotNum;
     }
-    
+
     // Check uniqueness for main lot
     await ensureLotNumberUniqueInCollection(
       userId,
@@ -838,6 +887,7 @@ router.post("/", async (req, res) => {
         dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
       } else {
         dupattaLotData.partyName = "Unknown";
+        dupattaLotData.dispatchedAt = null;
       }
       if (dupattaDetails.rate != null) dupattaLotData.rate = Number(dupattaDetails.rate);
       if (dupattaDetails.fabric) {
@@ -875,14 +925,18 @@ router.post("/", async (req, res) => {
       try {
         savedDupattaLot = await dupattaLot.save();
       } catch (dupErr) {
-        await GhausiaLot.findByIdAndDelete(savedMainLot._id).catch(() => {});
+        await GhausiaLot.findByIdAndDelete(savedMainLot._id).catch(() => { });
         throw dupErr;
       }
 
       await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
       await syncPartyLedgerForLot(savedDupattaLot, userId, req.businessOwnerId);
 
-      emitOrgChange(req, "lot", { lotId: String(savedDupattaLot._id) });
+      emitOrgChange(req, "lot", {
+        lotId: String(savedDupattaLot._id),
+        partyId: String(savedDupattaLot.partyId || ""),
+        adminOnly: !savedDupattaLot.partyId,
+      });
 
     } else {
       // 2-piece or dupatta-only
@@ -897,7 +951,6 @@ router.post("/", async (req, res) => {
         lotId: String(savedMainLot._id),
         action: "lot_dispatched",
         partyId: String(savedMainLot.partyId),
-        partyName: String(savedMainLot.partyName || ""),
         linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
       });
     } else if (savedMainLot.partyId) {
@@ -905,11 +958,10 @@ router.post("/", async (req, res) => {
         lotId: String(savedMainLot._id),
         action: "lot_assigned",
         partyId: String(savedMainLot.partyId),
-        partyName: String(savedMainLot.partyName || ""),
         linkPath: `/party-ledger?lotId=${String(savedMainLot._id)}`,
       });
     } else {
-      emitOrgChange(req, "lot", { lotId: String(savedMainLot._id) });
+      emitOrgChange(req, "lot", { lotId: String(savedMainLot._id), adminOnly: true });
     }
 
     if (savedDupattaLot) {
@@ -919,7 +971,6 @@ router.post("/", async (req, res) => {
           lotId: String(savedDupattaLot._id),
           action: "lot_dispatched",
           partyId: String(savedDupattaLot.partyId),
-          partyName: String(savedDupattaLot.partyName || ""),
           linkPath: `/party-ledger?lotId=${String(savedDupattaLot._id)}`,
         });
       }
@@ -960,10 +1011,10 @@ router.patch("/:id", async (req, res) => {
       : getScopedFilter(req, { _id: req.params.id });
     const body = isParty(req.user)
       ? Object.fromEntries(
-          Object.entries(req.body).filter(([key]) =>
-            partyEditableLotFields.has(key),
-          ),
-        )
+        Object.entries(req.body).filter(([key]) =>
+          partyEditableLotFields.has(key),
+        ),
+      )
       : req.body;
     // Validate update payload (at least one writable field required)
     const { error: updateErr } = updateLotSchema.validate(body, {
@@ -985,6 +1036,8 @@ router.patch("/:id", async (req, res) => {
 
     const payload = await normalizeLotUpdatePayload(body, userId);
     delete payload.completionApprovedAt;
+    delete payload.dispatchedAt;
+    delete payload.pendingReviewSubmittedAt;
 
     // ── Admin-only: move lot to a different workspace ──
     const moveTarget = String(body.moveToBusinessOwnerId || "").trim();
@@ -1011,15 +1064,50 @@ router.patch("/:id", async (req, res) => {
       const cur = normalizeStatus(existing.status);
       const next =
         payload.status != null ? normalizeStatus(payload.status) : cur;
+      const partyChangedForDispatch =
+        payload.partyId !== undefined &&
+        String(payload.partyId || "") !== String(existing.partyId || "");
       const hasApprovalTs = Boolean(existing.completionApprovedAt);
-      if (next === "received back" && cur !== "received back") {
+
+      if (
+        next === "dispatched" &&
+        (cur !== "dispatched" || partyChangedForDispatch)
+      ) {
+        payload.dispatchedAt = new Date();
+        if (!payload.dispatchDate) {
+          payload.dispatchDate = existing.dispatchDate && !partyChangedForDispatch
+            ? existing.dispatchDate
+            : new Date();
+        }
+      } else if (next === "pending" && cur !== "pending") {
+        payload.dispatchedAt = null;
+        payload.pendingReviewSubmittedAt = null;
+        payload.completionApprovedAt = null;
+        payload.dispatchDate = null;
+        payload.receivedBackDate = null;
+      }
+
+      if (next === "pending approval" && cur !== "pending approval") {
+        payload.pendingReviewSubmittedAt = new Date();
+        if (!payload.receivedBackDate) {
+          payload.receivedBackDate = existing.receivedBackDate || new Date();
+        }
+      } else if (next === "received back" && cur !== "received back") {
         payload.completionApprovedAt = new Date();
+        if (!payload.receivedBackDate) {
+          payload.receivedBackDate =
+            existing.receivedBackDate || existing.pendingReviewSubmittedAt || new Date();
+        }
       } else if (
         next === "completed" &&
         cur !== "completed" &&
         !hasApprovalTs
       ) {
         payload.completionApprovedAt = new Date();
+        if (!payload.receivedBackDate) {
+          payload.receivedBackDate =
+            existing.receivedBackDate || existing.pendingReviewSubmittedAt || new Date();
+        }
       }
     }
 
@@ -1034,21 +1122,21 @@ router.patch("/:id", async (req, res) => {
       }
       if (payload.status) {
         const next = normalizeStatus(payload.status);
-        if (next === "received back" || next === "completed") {
+        const allowedPartyTargets = ["dispatched", "in progress", "pending approval"];
+        if (!allowedPartyTargets.includes(next)) {
           return res.status(403).json({
             message:
-              "You cannot mark a lot billable directly. Submit for completion from your Party Ledger.",
+              "You cannot change this lot to that status. Submit for completion from your Party Ledger.",
           });
         }
-        if (next === "pending" && cur !== "pending") {
+        if (cur === "pending") {
           return res.status(403).json({
-            message: "Party users cannot revert a lot back to pending.",
+            message:
+              "This lot has not been dispatched yet. Wait for the business administrator to dispatch it.",
           });
         }
         if (next === "pending approval") {
-          // Allow pending, dispatched, in progress, rejected, or pending approval (updating under review)
           const allowedPrev = [
-            "pending",
             "dispatched",
             "in progress",
             "rejected",
@@ -1057,19 +1145,27 @@ router.patch("/:id", async (req, res) => {
           if (!allowedPrev.includes(cur)) {
             return res.status(400).json({
               message:
-                "You can submit for approval only when the lot is pending, dispatched, in progress, rejected, or pending approval.",
+                "You can submit for approval only when the lot is dispatched, in progress, rejected, or pending approval.",
             });
           }
           if (cur !== "pending approval") {
             becamePendingApproval = true;
             payload.pendingReviewSubmittedAt = new Date();
+            if (!payload.receivedBackDate && !existing.receivedBackDate) {
+              payload.receivedBackDate = new Date();
+            }
             if (cur === "rejected") {
               payload.rejectionNote = "";
             }
           }
         }
-        if (next === "dispatched" && cur === "rejected") {
-          payload.rejectionNote = "";
+        if (next === "dispatched") {
+          if (cur !== "dispatched" && !existing.dispatchedAt) {
+            payload.dispatchedAt = new Date();
+          }
+          if (cur === "rejected") {
+            payload.rejectionNote = "";
+          }
         }
       }
     }
@@ -1083,29 +1179,31 @@ router.patch("/:id", async (req, res) => {
     if ((existing.suitType !== "3-piece" || !existing.linkedLotId) && payload.suitType === "3-piece" && body.dupattaDetails && isMainComponent) {
       const dupattaDetails = body.dupattaDetails;
       payload.suitComponent = "main";
-      
-      let dupattaLotData = { 
-        ...payload, 
-        suitComponent: "dupatta", 
-        suitType: "3-piece", 
-        userId, 
+
+      let dupattaLotData = {
+        ...payload,
+        suitComponent: "dupatta",
+        suitType: "3-piece",
+        userId,
         businessOwnerId: effectiveBizOwnerId,
         status: "pending",
         dispatchDate: null,
+        dispatchedAt: null,
         receivedBackDate: null,
+        pendingReviewSubmittedAt: null,
         completionApprovedAt: null,
         rejectionNote: ""
       };
-      
+
       const baseLotNum = dupattaLotData.lotNumber || "";
       const formattedLotNum = !baseLotNum
         ? ""
         : baseLotNum.endsWith("-D")
-        ? baseLotNum
-        : baseLotNum + "-D";
+          ? baseLotNum
+          : baseLotNum + "-D";
       dupattaLotData.lotNumber = formattedLotNum;
       dupattaLotData.lotNo = formattedLotNum;
-      
+
       dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
       if (dupattaLotData.partyId) {
         dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
@@ -1121,7 +1219,7 @@ router.patch("/:id", async (req, res) => {
         dupattaLotData.quantity = Number(dupattaDetails.quantity);
         dupattaLotData.pieces = Number(dupattaDetails.quantity);
       }
-      
+
       if (payload.ownerBillingChoice === "combined") {
         payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
         payload.totalAmount = payload.billAmount;
@@ -1131,15 +1229,15 @@ router.patch("/:id", async (req, res) => {
         dupattaLotData.billAmount = Number(dupattaDetails.billAmount || 0);
         dupattaLotData.totalAmount = dupattaLotData.billAmount;
       }
-      
+
       const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
-      
+
       const checkBaseLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
       const finalCheckLotNumber = !checkBaseLotNumber
         ? ""
         : (checkBaseLotNumber || "").endsWith("-D")
-        ? checkBaseLotNumber
-        : checkBaseLotNumber + "-D";
+          ? checkBaseLotNumber
+          : checkBaseLotNumber + "-D";
 
       let existingDupatta = await GhausiaLot.findOne({
         userId,
@@ -1150,45 +1248,45 @@ router.patch("/:id", async (req, res) => {
       });
 
       if (existingDupatta) {
-         payload.linkedLotId = existingDupatta._id;
-         existingDupatta.linkedLotId = existing._id;
-         if (dupattaLotData.partyId !== undefined) existingDupatta.partyId = dupattaLotData.partyId;
-         if (dupattaLotData.partyName !== undefined) existingDupatta.partyName = dupattaLotData.partyName;
-         if (dupattaLotData.rate !== undefined) existingDupatta.rate = dupattaLotData.rate;
-         if (dupattaLotData.fabric !== undefined) {
-           existingDupatta.fabric = dupattaLotData.fabric;
-           existingDupatta.itemType = dupattaLotData.itemType;
-         }
-         if (dupattaLotData.quantity !== undefined) {
-           existingDupatta.quantity = dupattaLotData.quantity;
-           existingDupatta.pieces = dupattaLotData.pieces;
-         }
-         if (dupattaLotData.billAmount !== undefined) {
-           existingDupatta.billAmount = dupattaLotData.billAmount;
-           existingDupatta.totalAmount = dupattaLotData.totalAmount;
-         }
-         await existingDupatta.save();
-         await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
-         emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
-         updatedLinkedLot = existingDupatta;
+        payload.linkedLotId = existingDupatta._id;
+        existingDupatta.linkedLotId = existing._id;
+        if (dupattaLotData.partyId !== undefined) existingDupatta.partyId = dupattaLotData.partyId;
+        if (dupattaLotData.partyName !== undefined) existingDupatta.partyName = dupattaLotData.partyName;
+        if (dupattaLotData.rate !== undefined) existingDupatta.rate = dupattaLotData.rate;
+        if (dupattaLotData.fabric !== undefined) {
+          existingDupatta.fabric = dupattaLotData.fabric;
+          existingDupatta.itemType = dupattaLotData.itemType;
+        }
+        if (dupattaLotData.quantity !== undefined) {
+          existingDupatta.quantity = dupattaLotData.quantity;
+          existingDupatta.pieces = dupattaLotData.pieces;
+        }
+        if (dupattaLotData.billAmount !== undefined) {
+          existingDupatta.billAmount = dupattaLotData.billAmount;
+          existingDupatta.totalAmount = dupattaLotData.totalAmount;
+        }
+        await existingDupatta.save();
+        await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
+        emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
+        updatedLinkedLot = existingDupatta;
       } else {
-         await ensureLotNumberUniqueInCollection(
-           userId,
-           effectiveBizOwnerId,
-           finalCheckLotNumber,
-           null,
-           "dupatta",
-           checkIsRework
-         );
-         
-         newDupattaLot = new GhausiaLot(dupattaLotData);
-         payload.linkedLotId = newDupattaLot._id;
-         newDupattaLot.linkedLotId = existing._id;
+        await ensureLotNumberUniqueInCollection(
+          userId,
+          effectiveBizOwnerId,
+          finalCheckLotNumber,
+          null,
+          "dupatta",
+          checkIsRework
+        );
+
+        newDupattaLot = new GhausiaLot(dupattaLotData);
+        payload.linkedLotId = newDupattaLot._id;
+        newDupattaLot.linkedLotId = existing._id;
       }
     } else if (existing.suitType === "3-piece" && payload.suitType === "3-piece" && existing.linkedLotId && isMainComponent) {
       const dupattaDetails = body.dupattaDetails || {};
       let dupattaUpdateData = {};
-      
+
       if (dupattaDetails.partyId !== undefined) {
         dupattaUpdateData.partyId = String(dupattaDetails.partyId);
         if (dupattaUpdateData.partyId) {
@@ -1206,7 +1304,7 @@ router.patch("/:id", async (req, res) => {
         dupattaUpdateData.quantity = Number(dupattaDetails.quantity);
         dupattaUpdateData.pieces = Number(dupattaDetails.quantity);
       }
-      
+
       if (payload.ownerBillingChoice === "combined") {
         payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
         payload.totalAmount = payload.billAmount;
@@ -1222,42 +1320,42 @@ router.patch("/:id", async (req, res) => {
         const formattedLotNum = !baseLotNum
           ? ""
           : baseLotNum.endsWith("-D")
-          ? baseLotNum
-          : baseLotNum + "-D";
+            ? baseLotNum
+            : baseLotNum + "-D";
         dupattaUpdateData.lotNumber = formattedLotNum;
         dupattaUpdateData.lotNo = formattedLotNum;
       }
-      
+
       if (payload.isRework !== undefined) {
-         dupattaUpdateData.isRework = payload.isRework;
+        dupattaUpdateData.isRework = payload.isRework;
       }
 
       if (payload.designNo !== undefined) {
-         dupattaUpdateData.designNo = payload.designNo;
+        dupattaUpdateData.designNo = payload.designNo;
       }
-      
+
       if (payload.description !== undefined) {
-         dupattaUpdateData.description = payload.description;
+        dupattaUpdateData.description = payload.description;
       }
-      
+
       if (payload.colors !== undefined) {
-         dupattaUpdateData.colors = payload.colors;
+        dupattaUpdateData.colors = payload.colors;
       }
-      
+
       if (payload.allotDate !== undefined) {
-         dupattaUpdateData.allotDate = payload.allotDate;
-         dupattaUpdateData.receivedDate = payload.allotDate;
+        dupattaUpdateData.allotDate = payload.allotDate;
+        dupattaUpdateData.receivedDate = payload.allotDate;
       }
-      
+
       if (payload.lotNumber !== undefined || payload.isRework !== undefined) {
         const rawLotNumber = payload.lotNumber !== undefined ? payload.lotNumber : existing.lotNumber;
         const checkLotNumber = !rawLotNumber
           ? ""
           : (rawLotNumber || "").endsWith("-D")
-          ? rawLotNumber
-          : rawLotNumber + "-D";
+            ? rawLotNumber
+            : rawLotNumber + "-D";
         const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
-        
+
         if (checkLotNumber) {
           await ensureLotNumberUniqueInCollection(
             userId,
@@ -1269,15 +1367,15 @@ router.patch("/:id", async (req, res) => {
           );
         }
       }
-      
+
       updatedLinkedLot = await GhausiaLot.findOneAndUpdate(
         { _id: existing.linkedLotId, userId },
         dupattaUpdateData,
         { new: true },
       );
       if (updatedLinkedLot) {
-         await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
-         emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
+        await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
+        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
       }
     } else if (existing.suitType === "3-piece" && payload.suitType !== undefined && payload.suitType !== "3-piece" && isMainComponent) {
       payload.suitComponent = "main";
@@ -1334,6 +1432,20 @@ router.patch("/:id", async (req, res) => {
     const partyChanged =
       payload.partyId !== undefined &&
       String(payload.partyId || "") !== String(existing.partyId || "");
+
+    if (dupattaToDelete && String(dupattaToDelete) !== String(existing._id)) {
+      const dupBill = await OwnerBill.findOne({
+        userId,
+        "lots.lotId": String(dupattaToDelete),
+      })
+        .select("bookNo billNo")
+        .lean();
+      if (dupBill) {
+        return res.status(409).json({
+          message: `Linked dupatta is already billed in Owner Bill #${dupBill.billNo} (Book ${dupBill.bookNo}). Remove it from that bill before changing suit type.`,
+        });
+      }
+    }
 
     const lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
       new: true,
@@ -1399,17 +1511,19 @@ router.patch("/:id", async (req, res) => {
     }
 
     let dispatchNotifyLots = [];
+    const oldPartyId = String(existing.partyId || "");
+    const newPartyId = String(lotObj.partyId || "");
     if (becamePendingApproval) {
       emitOrgChange(req, "lot", {
         lotId: String(lot._id),
         action: "lot_pending_review",
+        partyId: newPartyId,
+        adminOnly: !newPartyId,
         linkPath: `/review-lots?lotId=${encodeURIComponent(String(lot._id))}`,
       });
     } else {
       let actionName = undefined;
       let linkPathStr = undefined;
-      const oldPartyId = String(existing.partyId || "");
-      const newPartyId = String(lotObj.partyId || "");
       const oldStatus = normalizeStatus(existing.status);
       const newStatus = normalizeStatus(lotObj.status);
       const isNowDispatched = newStatus === "dispatched" && Boolean(newPartyId);
@@ -1423,22 +1537,27 @@ router.patch("/:id", async (req, res) => {
         actionName = "lot_assigned";
         linkPathStr = `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`;
       }
-      
-      emitOrgChange(req, "lot", { 
-        lotId: String(lot._id), 
+
+      emitOrgChange(req, "lot", {
+        lotId: String(lot._id),
         partyId: newPartyId,
-        partyName: String(lotObj.partyName || ""),
+        previousPartyId: oldPartyId,
+        adminOnly: !newPartyId && !oldPartyId,
         ...(actionName && { action: actionName }),
-        ...(linkPathStr && { linkPath: linkPathStr })
+        ...(linkPathStr && { linkPath: linkPathStr }),
       });
     }
     if (newDupattaLot || updatedLinkedLot) {
       const responseLots = [lotObj];
       if (newDupattaLot) responseLots.push(newDupattaLot.toObject({ virtuals: true }));
       if (updatedLinkedLot) responseLots.push(updatedLinkedLot.toObject({ virtuals: true }));
-      res.json(responseLots);
+      res.json(
+        isParty(req.user)
+          ? responseLots.map(stripPrivateLotFieldsForParty)
+          : responseLots,
+      );
     } else {
-      res.json(lot);
+      res.json(isParty(req.user) ? stripPrivateLotFieldsForParty(lot) : lot);
     }
     if (becamePendingApproval) {
       void notifyLotPendingReview({ lot: lotObj, ownerId: userId });
@@ -1470,6 +1589,48 @@ router.delete("/:id", async (req, res) => {
     const deleteQuery = { _id: req.params.id, userId };
     if (req.businessOwnerId) deleteQuery.businessOwnerId = req.businessOwnerId;
 
+    const existingLot = await GhausiaLot.findOne(deleteQuery).lean();
+    if (!existingLot) {
+      return res.status(404).json({ message: "Lot not found" });
+    }
+
+    // Prevent leaving orphaned lots inside finalized OwnerBills or linked Owner payments
+    const candidateLotIds = [String(existingLot._id)];
+    const candidateBillIds = [];
+    if (existingLot.ownerBillId) candidateBillIds.push(existingLot.ownerBillId);
+    let orphanDupattaId = null;
+    if (existingLot.linkedLotId && (!existingLot.suitComponent || existingLot.suitComponent === "main")) {
+      candidateLotIds.push(String(existingLot.linkedLotId));
+    } else if (!existingLot.linkedLotId && (!existingLot.suitComponent || existingLot.suitComponent === "main")) {
+      const orphan = await GhausiaLot.findOne({
+        linkedLotId: existingLot._id,
+        userId,
+        suitComponent: "dupatta",
+      })
+        .select("_id ownerBillId")
+        .lean();
+      if (orphan) {
+        orphanDupattaId = orphan._id;
+        candidateLotIds.push(String(orphan._id));
+        if (orphan.ownerBillId) candidateBillIds.push(orphan.ownerBillId);
+      }
+    }
+
+    const blockingBill = await OwnerBill.findOne({
+      userId,
+      $or: [
+        ...(candidateBillIds.length ? [{ _id: { $in: candidateBillIds } }] : []),
+        { "lots.lotId": { $in: candidateLotIds } },
+      ],
+    })
+      .select("bookNo billNo")
+      .lean();
+    if (blockingBill) {
+      return res.status(409).json({
+        message: `Cannot delete: lot belongs to Owner Bill #${blockingBill.billNo} (Book ${blockingBill.bookNo}). Remove it from that bill first.`,
+      });
+    }
+
     const lot = await GhausiaLot.findOneAndDelete(deleteQuery);
     if (!lot) {
       return res.status(404).json({ message: "Lot not found" });
@@ -1477,7 +1638,8 @@ router.delete("/:id", async (req, res) => {
 
     // Use the lot's own businessOwnerId for all cleanup queries (Bug #2 & #5 fix).
     const lotBizId = String(lot.businessOwnerId || "");
-    
+    const lotPartyId = String(lot.partyId || "");
+
     let deletedLinkedId = null;
     let updatedLinkedLot = null;
 
@@ -1489,7 +1651,11 @@ router.delete("/:id", async (req, res) => {
           PartyLedger.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
           PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
         ]);
-        emitOrgChange(req, "lot", { lotId: String(lot.linkedLotId) });
+        emitOrgChange(req, "lot", {
+          lotId: String(lot.linkedLotId),
+          partyId: lotPartyId,
+          adminOnly: !lotPartyId,
+        });
         deletedLinkedId = String(lot.linkedLotId);
       } else if (lot.suitComponent === "dupatta") {
         updatedLinkedLot = await GhausiaLot.findOneAndUpdate({ _id: lot.linkedLotId, userId }, {
@@ -1498,37 +1664,69 @@ router.delete("/:id", async (req, res) => {
           ownerBillingChoice: "separate"
         }, { new: true });
         if (updatedLinkedLot) {
-          emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
+          emitOrgChange(req, "lot", {
+            lotId: String(updatedLinkedLot._id),
+            partyId: String(updatedLinkedLot.partyId || lotPartyId),
+            adminOnly: !(updatedLinkedLot.partyId || lotPartyId),
+          });
         }
       }
-    } else if (!lot.suitComponent || lot.suitComponent === "main") {
-      // Bug #3 fix: main lot has no linkedLotId, but a dupatta might point at it.
-      // Find and cascade-delete any orphan dupatta lot whose linkedLotId === this lot's _id.
+    } else if (orphanDupattaId) {
       const orphanDupatta = await GhausiaLot.findOneAndDelete({
-        linkedLotId: lot._id,
+        _id: orphanDupattaId,
         userId,
-        suitComponent: "dupatta",
       });
       if (orphanDupatta) {
         await Promise.all([
           PartyLedger.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
           PartyEdit.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
         ]);
-        emitOrgChange(req, "lot", { lotId: String(orphanDupatta._id) });
+        emitOrgChange(req, "lot", {
+          lotId: String(orphanDupatta._id),
+          partyId: lotPartyId,
+          adminOnly: !lotPartyId,
+        });
         deletedLinkedId = String(orphanDupatta._id);
       }
     }
-    
+
+    // Clear stale linkedLot string refs on standalone Payment rows without wiping payment amounts
+    const baseLotRef = String(lot.lotNo || lot.lotNumber || "").trim();
+    const linkedKeysToClear = [];
+    if (baseLotRef) {
+      linkedKeysToClear.push(
+        lot.isRework ? `${baseLotRef} (Rework)` : baseLotRef,
+        `${baseLotRef}-D`,
+        `${baseLotRef} (Rework)-D`,
+      );
+    }
+
     await Promise.all([
       PartyLedger.deleteMany({ lotId: String(lot._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
       PartyEdit.deleteMany({ lotId: String(lot._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
+      ...(linkedKeysToClear.length
+        ? [
+            Payment.updateMany(
+              {
+                userId,
+                ...(lotBizId ? { businessOwnerId: lotBizId } : {}),
+                linkedLot: { $in: linkedKeysToClear },
+              },
+              { $set: { linkedLot: "" } },
+            ),
+          ]
+        : []),
     ]);
-    
+
     const responsePayload = { message: "Lot deleted successfully" };
     if (deletedLinkedId) responsePayload.deletedLinkedId = deletedLinkedId;
     if (updatedLinkedLot) responsePayload.updatedLinkedLot = updatedLinkedLot.toObject({ virtuals: true });
-    
-    emitOrgChange(req, "lot", { lotId: String(lot._id) });
+
+    emitOrgChange(req, "lot", {
+      lotId: String(lot._id),
+      partyId: String(lot.partyId || ""),
+      adminOnly: !lot.partyId,
+    });
     res.json(responsePayload);
   } catch (error) {
     res

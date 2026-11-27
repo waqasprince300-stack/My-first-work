@@ -10,6 +10,7 @@ const {
   isParty,
   requireAdminUser,
   isTenantAdmin,
+  stripPrivatePaymentFieldsForParty,
   validateObjectIdParam,
 } = require("../utils/access");
 const { parsePaginationQuery, paginatedJson } = require("../utils/pagination");
@@ -126,11 +127,14 @@ router.get("/", async (req, res) => {
       }
       return paginatedJson(
         res,
-        rows.map((doc) => ({
-          ...doc,
-          id: String(doc._id),
-          hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
-        })),
+        rows.map((doc) => {
+          const item = {
+            ...doc,
+            id: String(doc._id),
+            hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
+          };
+          return isParty(req.user) ? stripPrivatePaymentFieldsForParty(item) : item;
+        }),
         total,
         pagination.page,
         pagination.limit,
@@ -153,11 +157,14 @@ router.get("/", async (req, res) => {
       slipIds = new Set(withSlip.map((d) => String(d._id)));
     }
     res.json(
-      payments.map((doc) => ({
-        ...doc,
-        id: String(doc._id),
-        hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
-      })),
+      payments.map((doc) => {
+        const item = {
+          ...doc,
+          id: String(doc._id),
+          hasReceipt: doc.hasReceipt === true || slipIds.has(String(doc._id)),
+        };
+        return isParty(req.user) ? stripPrivatePaymentFieldsForParty(item) : item;
+      }),
     );
   } catch (error) {
     res
@@ -186,7 +193,10 @@ router.get("/:id", async (req, res) => {
     if (!payment) {
       return res.status(404).json({ message: "Payment not found" });
     }
-    res.json(normalize(payment));
+    const payload = normalize(payment);
+    res.json(
+      isParty(req.user) ? stripPrivatePaymentFieldsForParty(payload) : payload,
+    );
   } catch (error) {
     res
       .status(500)
@@ -224,7 +234,10 @@ router.post("/", async (req, res) => {
       });
       void notifyPaymentRecorded({ payment: paymentObj, ownerId: userId });
     } else {
-      emitOrgChange(req, "payment", { paymentId: String(saved._id) });
+      emitOrgChange(req, "payment", {
+        paymentId: String(saved._id),
+        adminOnly: true,
+      });
     }
   } catch (error) {
     res
@@ -255,8 +268,16 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
     res.json(normalize(payment));
-    emitOrgChange(req, "payment", { paymentId: String(payment._id), action: "payment_updated", linkPath: "/payments" });
-    void notifyPaymentUpdated({ payment: payment.toObject ? payment.toObject() : payment, ownerId: userId });
+    const paymentObj = payment.toObject ? payment.toObject() : payment;
+    const partyLabel = String(paymentObj.party || "").trim().toLowerCase();
+    const isPartyPayment = Boolean(partyLabel && partyLabel !== "owner" && paymentObj.partyId);
+    emitOrgChange(req, "payment", {
+      paymentId: String(payment._id),
+      action: "payment_updated",
+      linkPath: "/payments",
+      ...(isPartyPayment ? { partyId: String(paymentObj.partyId) } : { adminOnly: true }),
+    });
+    void notifyPaymentUpdated({ payment: paymentObj, ownerId: userId });
   } catch (error) {
     res
       .status(400)
@@ -278,8 +299,16 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
     res.json({ message: "Payment deleted successfully" });
-    emitOrgChange(req, "payment", { paymentId: String(payment._id), action: "payment_deleted", linkPath: "/payments" });
-    void notifyPaymentDeleted({ payment: payment.toObject ? payment.toObject() : payment, ownerId: getDataOwnerId(req.user) });
+    const paymentObj = payment.toObject ? payment.toObject() : payment;
+    const partyLabel = String(paymentObj.party || "").trim().toLowerCase();
+    const isPartyPayment = Boolean(partyLabel && partyLabel !== "owner" && paymentObj.partyId);
+    emitOrgChange(req, "payment", {
+      paymentId: String(payment._id),
+      action: "payment_deleted",
+      linkPath: "/payments",
+      ...(isPartyPayment ? { partyId: String(paymentObj.partyId) } : { adminOnly: true }),
+    });
+    void notifyPaymentDeleted({ payment: paymentObj, ownerId: getDataOwnerId(req.user) });
   } catch (error) {
     res
       .status(500)

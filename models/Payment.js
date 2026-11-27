@@ -24,8 +24,25 @@ const paymentSchema = new mongoose.Schema(
     amount: {
       type: Number,
       required: true,
-      min: 0,
-      max: [100000000, "Amount cannot exceed 100,000,000"],
+      validate: {
+        validator(val) {
+          if (typeof val !== "number" || !Number.isFinite(val)) return false;
+          if (val < -100000000 || val > 100000000) return false;
+          const updateObj =
+            typeof this.getUpdate === "function" ? this.getUpdate() : null;
+          const queryObj =
+            typeof this.getQuery === "function" ? this.getQuery() : null;
+          const docType =
+            this.type ??
+            updateObj?.$set?.type ??
+            updateObj?.type ??
+            queryObj?.type;
+          if (docType === "Tally") return true;
+          return val >= 0;
+        },
+        message:
+          "Amount must be between 0 and 100,000,000 (or within [-100M, 100M] for Tally markers)",
+      },
     },
     party: {
       type: String,

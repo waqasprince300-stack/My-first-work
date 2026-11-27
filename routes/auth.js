@@ -368,7 +368,9 @@ const notApprovedResponse = (res, user) => {
   const messages = {
     pending: pendingMsg,
     rejected: "Your account request was rejected",
-    disabled: "Your account has been disabled",
+    disabled: user.disabledReason
+      ? `Your account has been disabled: ${user.disabledReason}`
+      : "Your account has been disabled",
   };
 
   return res.status(403).json({
@@ -874,6 +876,7 @@ router.post("/account/upgrade", authenticate, otpLimiter, async (req, res) => {
     if (req.body.partyName) user.partyName = String(req.body.partyName).trim();
     if (req.body.partyId) user.partyId = String(req.body.partyId).trim();
     await user.save({ validateBeforeSave: false });
+    invalidateAuthUserCache(user._id);
 
     return res.json({
       message:

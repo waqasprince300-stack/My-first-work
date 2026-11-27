@@ -2,6 +2,8 @@ const express = require("express");
 const { invalidateAuthUserCache } = require("../middleware/auth");
 const User = require("../models/User");
 const Party = require("../models/Party");
+const { disconnectUserSockets, emitOrgChange } = require("../utils/realtime");
+const { deletePartyUserLoginOnly } = require("../utils/userLifecycle");
 const {
   resolveBusinessOwnerAllowMissing,
   isTenantAdmin,
@@ -199,6 +201,11 @@ router.patch(
 
 router.patch("/:id/reject", async (req, res) => {
   try {
+    if (!isTenantAdmin(req.user)) {
+      return res
+        .status(403)
+        .json({ message: "Business admin access required" });
+    }
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -218,7 +225,6 @@ router.patch("/:id/reject", async (req, res) => {
     }
 
     if (
-      !isTenantAdmin(req.user) ||
       user.role !== "party" ||
       String(user.pendingForAdminId) !== String(req.user._id)
     ) {
@@ -230,6 +236,7 @@ router.patch("/:id/reject", async (req, res) => {
     user.disabledAt = null;
     await user.save({ validateBeforeSave: false });
     invalidateAuthUserCache(user._id);
+    disconnectUserSockets(req.io, user._id);
 
     res.json(normalizeUser(user));
   } catch (error) {
@@ -241,6 +248,11 @@ router.patch("/:id/reject", async (req, res) => {
 
 router.patch("/:id/disable", async (req, res) => {
   try {
+    if (!isTenantAdmin(req.user)) {
+      return res
+        .status(403)
+        .json({ message: "Business admin access required" });
+    }
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -251,12 +263,6 @@ router.patch("/:id/disable", async (req, res) => {
       return res
         .status(400)
         .json({ message: "You cannot disable your own account" });
-    }
-
-    if (!isTenantAdmin(req.user)) {
-      return res
-        .status(403)
-        .json({ message: "Business admin access required" });
     }
 
     if (
@@ -276,6 +282,7 @@ router.patch("/:id/disable", async (req, res) => {
     user.disabledAt = new Date();
     await user.save({ validateBeforeSave: false });
     invalidateAuthUserCache(user._id);
+    disconnectUserSockets(req.io, user._id);
 
     res.json(normalizeUser(user));
   } catch (error) {
@@ -411,5 +418,41 @@ router.patch(
     }
   },
 );
+
+/** Safe login-only delete for party users: preserves all business parties, lots, and ledger records. */
+router.delete("/:id", async (req, res) => {
+  try {
+    if (!isTenantAdmin(req.user)) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    if (String(req.params.id) === String(req.user._id)) {
+      return res
+        .status(400)
+        .json({ message: "Cannot delete your own administrator account" });
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user || user.role !== "party") {
+      return res.status(404).json({ message: "Party user not found" });
+    }
+
+    const adminId = String(req.user._id);
+    const belongsToAdmin =
+      (user.ownerId && String(user.ownerId) === adminId) ||
+      (user.pendingForAdminId && String(user.pendingForAdminId) === adminId);
+    if (!belongsToAdmin) {
+      return res.status(404).json({ message: "Party user not found" });
+    }
+
+    const result = await deletePartyUserLoginOnly(user);
+    disconnectUserSockets(req.io, user._id);
+    emitOrgChange(req, "users", { targetUserId: String(user._id) });
+    res.json(result);
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error deleting user", error: error.message });
+  }
+});
 
 module.exports = router;

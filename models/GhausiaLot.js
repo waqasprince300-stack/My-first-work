@@ -119,6 +119,12 @@ const ghausiaLotSchema = new mongoose.Schema(
       default: null,
       required: false,
     },
+    /** Exact timestamp when the lot was dispatched to a party (used to float dispatched lots to the top of Workspace). */
+    dispatchedAt: {
+      type: Date,
+      default: null,
+      required: false,
+    },
     receivedBackDate: {
       type: Date,
       default: null,
