@@ -137,7 +137,7 @@ function enforcePartyPostApprovalLock(
   req,
   targetLotStatus,
   payload,
-  targetLot = null,
+  _targetLot = null,
   existingPe = null,
 ) {
   if (!isParty(req.user)) return null;
@@ -157,9 +157,7 @@ function enforcePartyPostApprovalLock(
     if (!Number.isFinite(toAmt) || toAmt < 0) {
       return "Requested revised bill amount must be a valid non-negative number.";
     }
-    const serverFromAmt = Number(
-      existingPe?.partyBillAmount ?? targetLot?.billAmount ?? 0,
-    );
+    const serverFromAmt = Number(existingPe?.partyBillAmount ?? 0);
     payload.billRevisionRequest = {
       fromAmount: Number.isFinite(serverFromAmt) && serverFromAmt >= 0 ? serverFromAmt : 0,
       toAmount: Math.round(toAmt),
@@ -507,13 +505,15 @@ router.get("/lot/:lotId", async (req, res) => {
     if (!includeVoiceNotes) exclude.push("-partyVoiceNote", "-adminVoiceNote");
     const fieldSelect = exclude.length ? exclude.join(" ") : undefined;
 
-    let row = await PartyEdit.findOne({
-      lotId: lotIdStr,
-      userId,
-      businessOwnerId,
-    })
-      .select(fieldSelect)
-      .lean();
+    let row = businessOwnerId
+      ? await PartyEdit.findOne({
+          lotId: lotIdStr,
+          userId,
+          businessOwnerId,
+        })
+          .select(fieldSelect)
+          .lean()
+      : null;
 
     // Both the admin and the party ledger span multiple workspaces, so a businessOwnerId/header
     // mismatch (e.g. legacy rows saved with an empty businessOwnerId) must not hide an existing
@@ -688,6 +688,16 @@ router.post("/", async (req, res) => {
     if (sizeError) {
       return res.status(400).json({ message: sizeError });
     }
+    if (cleanLotId && Object.prototype.hasOwnProperty.call(payload, "lotImages")) {
+      const lotImagesError = await assertLotImagesWithinColorLimit(
+        req,
+        cleanLotId,
+        payload.lotImages,
+      );
+      if (lotImagesError) {
+        return res.status(400).json({ message: lotImagesError });
+      }
+    }
     const savedPartyEdit = existingDoc
       ? await PartyEdit.findOneAndUpdate(
           { _id: existingDoc._id },
@@ -706,8 +716,14 @@ router.post("/", async (req, res) => {
     });
     res.status(existingDoc ? 200 : 201).json(serializePartyEditForUser(savedPartyEdit.toObject(), req.user));
   } catch (error) {
+    const status =
+      error?.code === 11000
+        ? 409
+        : error?.name === "ValidationError" || error?.name === "CastError"
+          ? 400
+          : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error creating party edit", error: error.message });
   }
 });
@@ -825,8 +841,14 @@ router.patch("/:id", async (req, res) => {
     });
     res.json(serializePartyEditForUser(partyEdit.toObject(), req.user));
   } catch (error) {
+    const status =
+      error?.code === 11000
+        ? 409
+        : error?.name === "ValidationError" || error?.name === "CastError"
+          ? 400
+          : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error updating party edit", error: error.message });
   }
 });
@@ -1094,8 +1116,14 @@ router.put("/lot/:lotId", async (req, res) => {
       }
     }
   } catch (error) {
+    const status =
+      error?.code === 11000
+        ? 409
+        : error?.name === "ValidationError" || error?.name === "CastError"
+          ? 400
+          : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error upserting party edit", error: error.message });
   }
 });
@@ -1104,14 +1132,27 @@ router.put("/lot/:lotId", async (req, res) => {
 router.delete("/:id", async (req, res) => {
   try {
     if (!requireAdminUser(req, res)) return;
+    const ownerId = getDataOwnerId(req.user);
     const partyEdit = await PartyEdit.findOneAndDelete({
       _id: req.params.id,
-      userId: getDataOwnerId(req.user),
-      businessOwnerId: req.businessOwnerId,
+      userId: ownerId,
+      ...(isTenantAdmin(req.user) ? {} : getBusinessOwnerFilter(req)),
     });
     if (!partyEdit) {
       return res.status(404).json({ message: "Party edit not found" });
     }
+    let targetLotPartyId = "";
+    if (partyEdit.lotId) {
+      const lt = await GhausiaLot.findOne({ _id: partyEdit.lotId, userId: ownerId })
+        .select("partyId")
+        .lean();
+      targetLotPartyId = String(lt?.partyId || "");
+    }
+    emitOrgChange(req, "partyEdit", {
+      lotId: String(partyEdit.lotId || ""),
+      partyId: targetLotPartyId,
+      adminOnly: !targetLotPartyId,
+    });
     res.json({ message: "Party edit deleted successfully" });
   } catch (error) {
     res

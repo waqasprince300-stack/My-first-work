@@ -45,7 +45,7 @@ router.get("/", async (req, res) => {
       ]);
       return paginatedJson(
         res,
-        items,
+        isParty(req.user) ? items.map(sanitizePartyForParty) : items,
         total,
         pagination.page,
         pagination.limit,
@@ -286,24 +286,68 @@ router.delete("/:id/permanent", async (req, res) => {
     const partyId = String(party._id);
     // Strip out the (Deleted timestamp) suffix if it exists for cascading text fields
     const partyName = (party.name || "").replace(/ \(Deleted \d+\)$/, "");
+    const bizScope = party.businessOwnerId ? { businessOwnerId: party.businessOwnerId } : {};
+    const unlinkedPartyIdCond = {
+      $or: [{ partyId: { $exists: false } }, { partyId: "" }, { partyId: null }],
+    };
     const clearPartyRef = { $set: { partyId: "", partyName: "Unknown (deleted)" } };
-    const partyFilter = { userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
-    
+    const partyFilter = {
+      userId,
+      $or: [
+        { partyId },
+        ...(partyName ? [{ ...bizScope, ...unlinkedPartyIdCond, partyName }] : []),
+      ],
+    };
+
     // Find lots belonging to this party BEFORE clearing their partyId
     const lotsOfParty = await GhausiaLot.find(partyFilter).select("_id").lean();
-    const lotIds = lotsOfParty.map(l => String(l._id));
+    const lotIds = lotsOfParty.map((l) => String(l._id));
 
     const User = require("../models/User");
     const { invalidateAuthUserCache } = require("../middleware/auth");
-    const userFilter = { role: "party", ownerId: userId, $or: [{ partyId }, ...(partyName ? [{ partyName }] : [])] };
+    const userFilter = {
+      role: "party",
+      ownerId: userId,
+      $or: [
+        { partyId },
+        ...(partyName
+          ? [
+              {
+                ...unlinkedPartyIdCond,
+                partyName,
+                ...(party.businessOwnerId
+                  ? { businessOwnerId: String(party.businessOwnerId) }
+                  : {}),
+              },
+            ]
+          : []),
+      ],
+    };
     const usersToDisable = await User.find(userFilter).select("_id").lean();
 
     await Promise.all([
       GhausiaLot.updateMany(partyFilter, clearPartyRef),
-      Payment.updateMany({ userId, $or: [{ partyId }, ...(partyName ? [{ party: partyName }] : [])] }, { $set: { partyId: "", party: "Unknown (deleted)" } }),
+      Payment.updateMany(
+        {
+          userId,
+          $or: [
+            { partyId },
+            ...(partyName ? [{ ...bizScope, ...unlinkedPartyIdCond, party: partyName }] : []),
+          ],
+        },
+        { $set: { partyId: "", party: "Unknown (deleted)" } },
+      ),
       PartyEdit.deleteMany({ userId, lotId: { $in: lotIds } }),
       PartyLedger.deleteMany(partyFilter),
-      User.updateMany(userFilter, { $set: { status: "disabled", disabledAt: new Date(), partyId: "", partyName: "Unknown (deleted)" } }),
+      User.updateMany(userFilter, {
+        $set: {
+          status: "disabled",
+          disabledAt: new Date(),
+          disabledReason: "party_deleted",
+          partyId: "",
+          partyName: "Unknown (deleted)",
+        },
+      }),
     ]);
 
     for (const u of usersToDisable) {

@@ -24,6 +24,29 @@ const AUTH_USER_FIELDS = [
 
 const { getJwtSecret } = require("../utils/jwt");
 
+const getCachedAuthUser = async (userId) => {
+  const idStr = String(userId || "").trim();
+  if (!idStr) return null;
+  let user = getCached(AUTH_USER_CACHE, idStr);
+  if (!user) {
+    user = await User.findById(idStr)
+      .select(AUTH_USER_FIELDS.join(" "))
+      .lean();
+    if (user) {
+      setCached(AUTH_USER_CACHE, idStr, user, AUTH_USER_TTL_MS);
+    }
+  }
+  return user;
+};
+
+const isOwnerAdminApproved = async (user) => {
+  if (!user || user.role !== "party") return true;
+  const ownerId = user.ownerId || user.approvedBy;
+  if (!ownerId) return false;
+  const owner = await getCachedAuthUser(ownerId);
+  return Boolean(owner && owner.status === "approved");
+};
+
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -34,17 +57,7 @@ const authenticate = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, getJwtSecret());
-    const userId = String(decoded.id || "");
-    let user = getCached(AUTH_USER_CACHE, userId);
-
-    if (!user) {
-      user = await User.findById(decoded.id)
-        .select(AUTH_USER_FIELDS.join(" "))
-        .lean();
-      if (user) {
-        setCached(AUTH_USER_CACHE, userId, user, AUTH_USER_TTL_MS);
-      }
-    }
+    const user = await getCachedAuthUser(decoded.id);
 
     if (!user) {
       return res.status(401).json({ message: "User no longer exists" });
@@ -59,12 +72,20 @@ const authenticate = async (req, res, next) => {
   }
 };
 
-const requireApproved = (req, res, next) => {
-  if (req.user?.status !== "approved") {
-    return res.status(403).json({ message: "Account is not approved yet" });
+const requireApproved = async (req, res, next) => {
+  try {
+    if (req.user?.status !== "approved") {
+      return res.status(403).json({ message: "Account is not approved yet" });
+    }
+    if (req.user.role === "party" && !(await isOwnerAdminApproved(req.user))) {
+      return res.status(403).json({
+        message: "Your organization administrator account is disabled or no longer active",
+      });
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
-
-  next();
 };
 
 /** Approved tenant (business) admin — manages businesses, parties, operational data. */
@@ -102,3 +123,4 @@ module.exports.requireTenantAdmin = requireTenantAdmin;
 module.exports.requireSuperAdmin = requireSuperAdmin;
 module.exports.requireAdmin = requireAdmin;
 module.exports.invalidateAuthUserCache = invalidateAuthUserCache;
+module.exports.isOwnerAdminApproved = isOwnerAdminApproved;

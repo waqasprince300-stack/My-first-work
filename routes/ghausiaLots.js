@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const router = express.Router();
 const GhausiaLot = require("../models/GhausiaLot");
 const OwnerBill = require("../models/OwnerBill");
@@ -135,16 +136,44 @@ const normalizeStatus = (status) => {
   return "pending";
 };
 
+const toFiniteNonNeg = (val) => {
+  if (val === undefined || val === null || val === "") return null;
+  const n = Number(val);
+  return Number.isFinite(n) ? Math.max(0, n) : null;
+};
+
+const sendLotError = (res, error, fallbackMessage) => {
+  if (error?.code === "DUPLICATE_LOT_NUMBER" || error?.code === 11000) {
+    return res.status(409).json({ message: error.message });
+  }
+  if (
+    error?.code === "MISSING_BUSINESS_OWNER" ||
+    error?.name === "ValidationError" ||
+    error?.name === "CastError"
+  ) {
+    return res.status(400).json({ message: error.message });
+  }
+  return res
+    .status(500)
+    .json({ message: fallbackMessage, error: error?.message || "Unknown error" });
+};
+
 const resolvePartyName = async (partyId, explicitName, userId) => {
   const normalizedName =
     typeof explicitName === "string" ? explicitName.trim() : "";
-  if (normalizedName) return normalizedName;
-  if (!partyId) return "Unknown";
-  const party = await Party.findOne({
-    userId,
-    $or: [{ _id: partyId }, { id: partyId }],
-  });
-  return party?.name || "Unknown";
+  if (normalizedName && normalizedName.toLowerCase() !== "unknown") {
+    return normalizedName;
+  }
+  const cleanId = partyId ? String(partyId).trim() : "";
+  if (!cleanId) return normalizedName || "Unknown";
+  const orConds = [{ id: cleanId }];
+  if (mongoose.Types.ObjectId.isValid(cleanId)) {
+    orConds.unshift({ _id: cleanId });
+  }
+  const party = await Party.findOne({ userId, $or: orConds })
+    .select("name")
+    .lean();
+  return party?.name || normalizedName || "Unknown";
 };
 
 const normalizeLotPayload = async (payload, userId, businessOwnerId) => {
@@ -559,7 +588,10 @@ router.post("/:id/approve-completion", async (req, res) => {
     }
     const cur = normalizeStatus(lot.status);
     if (cur !== "pending approval") {
-      return res.status(400).json({ message: "Lot is not awaiting approval" });
+      return res.status(400).json({
+        code: "NOT_AWAITING_APPROVAL",
+        message: "Lot is not awaiting approval",
+      });
     }
 
     const skipBillable = Boolean(req.body?.skipBillable);
@@ -581,59 +613,66 @@ router.post("/:id/approve-completion", async (req, res) => {
       lot.pendingReviewSubmittedAt ||
       fallbackRecDate;
 
-    if (skipBillable) {
-      lot.status = "completed";
-      if (!lot.receivedBackDate) lot.receivedBackDate = partySubmittedAnchor;
-    } else {
-      lot.status = "received back";
-      if (!lot.receivedBackDate) lot.receivedBackDate = partySubmittedAnchor;
-    }
-
-    lot.rejectionNote = "";
-    lot.completionApprovedAt = new Date();
+    const lotUpdates = {
+      status: skipBillable ? "completed" : "received back",
+      receivedBackDate: lot.receivedBackDate || partySubmittedAnchor,
+      rejectionNote: "",
+      completionApprovedAt: new Date(),
+    };
 
     const ownerBillingChoice = String(
       req.body?.ownerBillingChoice || "",
     ).trim();
-    const partyBill = Number(peDoc?.partyBillAmount ?? 0);
+    const partyBill = Math.max(0, Number(peDoc?.partyBillAmount ?? 0) || 0);
     if (ownerBillingChoice === "sync_party") {
-      lot.billAmount = partyBill;
-      lot.totalAmount = partyBill;
+      lotUpdates.billAmount = partyBill;
+      lotUpdates.totalAmount = partyBill;
     } else if (ownerBillingChoice === "custom_ghausia") {
       const custom = Number(req.body?.ownerBillAmount);
       if (Number.isFinite(custom) && custom >= 0) {
-        lot.billAmount = custom;
-        lot.totalAmount = custom;
+        lotUpdates.billAmount = custom;
+        lotUpdates.totalAmount = custom;
       }
     } else if (ownerBillingChoice === "delta_only" && peDoc?.pendingRevision) {
       const fromA = Number(peDoc.pendingRevision.fromAmount ?? 0);
       const toA = Number(peDoc.pendingRevision.toAmount ?? 0);
       const delta = toA - fromA;
       const adjusted = Math.max(0, Number(lot.billAmount || 0) + delta);
-      lot.billAmount = adjusted;
-      lot.totalAmount = adjusted;
+      lotUpdates.billAmount = adjusted;
+      lotUpdates.totalAmount = adjusted;
     }
 
-    await lot.save();
+    // Atomic concurrency guard: only transition if still awaiting approval
+    const approvedLot = await GhausiaLot.findOneAndUpdate(
+      { _id: req.params.id, userId, status: lot.status },
+      { $set: lotUpdates },
+      { new: true, runValidators: true },
+    );
+    if (!approvedLot) {
+      return res.status(400).json({
+        code: "NOT_AWAITING_APPROVAL",
+        message: "Lot is not awaiting approval",
+      });
+    }
 
+    // Never put the same path (businessOwnerId) in both $set and $setOnInsert — MongoDB rejects conflicting operators
     await PartyEdit.findOneAndUpdate(
       peDoc
         ? { _id: peDoc._id }
         : {
           lotId: lotIdStr,
           userId,
-          businessOwnerId: lot.businessOwnerId,
+          businessOwnerId: approvedLot.businessOwnerId,
         },
       {
         $set: {
-          businessOwnerId: lot.businessOwnerId,
+          businessOwnerId: approvedLot.businessOwnerId,
           overrideStatus: "Completed",
-          completeDate: peDoc?.completeDate || lot.receivedBackDate || partySubmittedAnchor,
+          completeDate: peDoc?.completeDate || approvedLot.receivedBackDate || partySubmittedAnchor,
         },
         $setOnInsert: {
           lotId: lotIdStr,
           userId,
-          businessOwnerId: lot.businessOwnerId,
         },
         $unset: { pendingRevision: "" },
       },
@@ -641,35 +680,38 @@ router.post("/:id/approve-completion", async (req, res) => {
     );
 
     await syncPartyLedgerForLot(
-      lot.toObject({ virtuals: true }),
+      approvedLot.toObject({ virtuals: true }),
       userId,
-      lot.businessOwnerId,
+      approvedLot.businessOwnerId,
     );
     emitOrgChange(req, "lot", {
-      lotId: String(lot._id),
+      lotId: String(approvedLot._id),
       action: "lot_approved",
-      partyId: String(lot.partyId || ""),
-      adminOnly: !lot.partyId,
-      linkPath: `/party-ledger?lotId=${String(lot._id)}`,
+      partyId: String(approvedLot.partyId || ""),
+      adminOnly: !approvedLot.partyId,
+      linkPath: `/party-ledger?lotId=${String(approvedLot._id)}`,
     });
-    res.json(lot);
-    void notifyLotApproved({ lot: lot.toObject({ virtuals: true }), ownerId: userId });
+    res.json(approvedLot);
+    void notifyLotApproved({ lot: approvedLot.toObject({ virtuals: true }), ownerId: userId });
     void Notification.updateMany(
-      { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
+      { lotId: String(approvedLot._id), type: "lot_pending_review", readAt: null },
       { $set: { readAt: new Date() } }
     ).then((r) => {
       if (r?.modifiedCount > 0) {
         emitOrgChange(req, "notification", {
           action: "notifications_marked_read",
           targetUserId: String(req.user._id),
-          lotId: String(lot._id),
+          lotId: String(approvedLot._id),
           category: "review_lots",
         });
       }
     }).catch(() => { });
   } catch (error) {
+    console.error("[approve-completion] Error:", error);
+    const statusCode =
+      error?.name === "ValidationError" || error?.name === "CastError" ? 400 : 500;
     res
-      .status(400)
+      .status(statusCode)
       .json({ message: "Could not approve lot", error: error.message });
   }
 });
@@ -694,19 +736,35 @@ router.post("/:id/reject-completion", async (req, res) => {
     }
     const cur = normalizeStatus(lot.status);
     if (cur !== "pending approval") {
-      return res.status(400).json({ message: "Lot is not awaiting approval" });
+      return res.status(400).json({
+        code: "NOT_AWAITING_APPROVAL",
+        message: "Lot is not awaiting approval",
+      });
     }
 
-    lot.status = "rejected";
-    lot.rejectionNote = note;
-    lot.rejectedDate = new Date();
-    await lot.save();
+    const rejectedLot = await GhausiaLot.findOneAndUpdate(
+      { _id: req.params.id, userId, status: lot.status },
+      {
+        $set: {
+          status: "rejected",
+          rejectionNote: note,
+          rejectedDate: new Date(),
+        },
+      },
+      { new: true, runValidators: true },
+    );
+    if (!rejectedLot) {
+      return res.status(400).json({
+        code: "NOT_AWAITING_APPROVAL",
+        message: "Lot is not awaiting approval",
+      });
+    }
 
-    const lotIdStr = String(lot._id);
+    const lotIdStr = String(rejectedLot._id);
     let existingRejPe = await PartyEdit.findOne({
       lotId: lotIdStr,
       userId,
-      businessOwnerId: lot.businessOwnerId,
+      businessOwnerId: rejectedLot.businessOwnerId,
     })
       .select("_id")
       .lean();
@@ -721,17 +779,16 @@ router.post("/:id/reject-completion", async (req, res) => {
         : {
           lotId: lotIdStr,
           userId,
-          businessOwnerId: lot.businessOwnerId,
+          businessOwnerId: rejectedLot.businessOwnerId,
         },
       {
         $set: {
-          businessOwnerId: lot.businessOwnerId,
+          businessOwnerId: rejectedLot.businessOwnerId,
           overrideStatus: "Rejected",
         },
         $setOnInsert: {
           lotId: lotIdStr,
           userId,
-          businessOwnerId: lot.businessOwnerId,
         },
         $unset: { pendingRevision: "" },
       },
@@ -739,36 +796,39 @@ router.post("/:id/reject-completion", async (req, res) => {
     );
 
     await syncPartyLedgerForLot(
-      lot.toObject({ virtuals: true }),
+      rejectedLot.toObject({ virtuals: true }),
       userId,
-      lot.businessOwnerId,
+      rejectedLot.businessOwnerId,
     );
-    const lotObj = lot.toObject({ virtuals: true });
+    const lotObj = rejectedLot.toObject({ virtuals: true });
     emitOrgChange(req, "lot", {
-      lotId: String(lot._id),
+      lotId: String(rejectedLot._id),
       action: "lot_rejected",
-      partyId: String(lot.partyId || ""),
-      adminOnly: !lot.partyId,
-      linkPath: `/party-ledger?lotId=${encodeURIComponent(String(lot._id))}`,
+      partyId: String(rejectedLot.partyId || ""),
+      adminOnly: !rejectedLot.partyId,
+      linkPath: `/party-ledger?lotId=${encodeURIComponent(String(rejectedLot._id))}`,
     });
-    res.json(lot);
+    res.json(rejectedLot);
     void notifyLotRejected({ lot: lotObj, note, ownerId: userId });
     void Notification.updateMany(
-      { lotId: String(lot._id), type: "lot_pending_review", readAt: null },
+      { lotId: String(rejectedLot._id), type: "lot_pending_review", readAt: null },
       { $set: { readAt: new Date() } }
     ).then((r) => {
       if (r?.modifiedCount > 0) {
         emitOrgChange(req, "notification", {
           action: "notifications_marked_read",
           targetUserId: String(req.user._id),
-          lotId: String(lot._id),
+          lotId: String(rejectedLot._id),
           category: "review_lots",
         });
       }
     }).catch(() => { });
   } catch (error) {
+    console.error("[reject-completion] Error:", error);
+    const statusCode =
+      error?.name === "ValidationError" || error?.name === "CastError" ? 400 : 500;
     res
-      .status(400)
+      .status(statusCode)
       .json({ message: "Could not reject lot", error: error.message });
   }
 });
@@ -863,10 +923,20 @@ router.post("/", async (req, res) => {
     let savedDupattaLot;
 
     // Handle 3-piece logic
+    const normalizedBillingChoice =
+      ownerBillingChoice === "combined" ? "combined" : "separate";
     if (payload.suitType === "3-piece" && dupattaDetails) {
       // Create Main Lot
-      const mainLotData = { ...payload, suitComponent: "main" };
-      const dupattaLotData = { ...payload, suitComponent: "dupatta" };
+      const mainLotData = {
+        ...payload,
+        suitComponent: "main",
+        ownerBillingChoice: normalizedBillingChoice,
+      };
+      const dupattaLotData = {
+        ...payload,
+        suitComponent: "dupatta",
+        ownerBillingChoice: normalizedBillingChoice,
+      };
       const baseLotNum = dupattaLotData.lotNumber || "";
       const formattedLotNum = baseLotNum.endsWith("-D") ? baseLotNum : baseLotNum + "-D";
       dupattaLotData.lotNumber = formattedLotNum;
@@ -882,27 +952,35 @@ router.post("/", async (req, res) => {
       );
 
       // Apply Dupatta Specific Details
-      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
+      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId).trim() : "";
       if (dupattaLotData.partyId) {
         dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
       } else {
         dupattaLotData.partyName = "Unknown";
+        dupattaLotData.status = "pending";
+        dupattaLotData.dispatchDate = null;
         dupattaLotData.dispatchedAt = null;
+        dupattaLotData.pendingReviewSubmittedAt = null;
+        dupattaLotData.completionApprovedAt = null;
+        dupattaLotData.receivedBackDate = null;
       }
-      if (dupattaDetails.rate != null) dupattaLotData.rate = Number(dupattaDetails.rate);
+      const dupRate = toFiniteNonNeg(dupattaDetails.rate);
+      if (dupRate !== null) dupattaLotData.rate = dupRate;
       if (dupattaDetails.fabric) {
         dupattaLotData.fabric = dupattaDetails.fabric;
         dupattaLotData.itemType = dupattaDetails.fabric;
       }
-      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
-        dupattaLotData.quantity = Number(dupattaDetails.quantity);
-        dupattaLotData.pieces = Number(dupattaDetails.quantity);
+      const dupQty = toFiniteNonNeg(dupattaDetails.quantity);
+      if (dupQty !== null) {
+        dupattaLotData.quantity = dupQty;
+        dupattaLotData.pieces = dupQty;
       }
 
+      const dupBill = toFiniteNonNeg(dupattaDetails.billAmount) ?? 0;
       // Handle Combined vs Separate Billing
-      if (ownerBillingChoice === "combined") {
+      if (normalizedBillingChoice === "combined") {
         // Main gets the combined bill
-        mainLotData.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
+        mainLotData.billAmount = (toFiniteNonNeg(payload.billAmount) ?? 0) + dupBill;
         mainLotData.totalAmount = mainLotData.billAmount;
 
         // Dupatta gets 0 owner bill
@@ -910,8 +988,8 @@ router.post("/", async (req, res) => {
         dupattaLotData.totalAmount = 0;
       } else {
         // Separate bills
-        dupattaLotData.billAmount = Number(dupattaDetails.billAmount || 0);
-        dupattaLotData.totalAmount = dupattaLotData.billAmount;
+        dupattaLotData.billAmount = dupBill;
+        dupattaLotData.totalAmount = dupBill;
       }
 
       // Create sequentially with rollback so failed dupatta save never leaves an orphan main lot
@@ -940,7 +1018,12 @@ router.post("/", async (req, res) => {
 
     } else {
       // 2-piece or dupatta-only
-      const lot = new GhausiaLot(payload);
+      const lot = new GhausiaLot({
+        ...payload,
+        ...(ownerBillingChoice !== undefined
+          ? { ownerBillingChoice: normalizedBillingChoice }
+          : {}),
+      });
       savedMainLot = await lot.save();
       await syncPartyLedgerForLot(savedMainLot, userId, req.businessOwnerId);
     }
@@ -989,15 +1072,7 @@ router.post("/", async (req, res) => {
       void notifyLotDispatched({ lot: savedDupattaLot.toObject ? savedDupattaLot.toObject() : savedDupattaLot, ownerId: userId });
     }
   } catch (error) {
-    if (error.code === "DUPLICATE_LOT_NUMBER") {
-      return res.status(409).json({ message: error.message });
-    }
-    if (error.code === "MISSING_BUSINESS_OWNER") {
-      return res.status(400).json({ message: error.message });
-    }
-    res
-      .status(400)
-      .json({ message: "Error creating lot", error: error.message });
+    return sendLotError(res, error, "Error creating lot");
   }
 });
 
@@ -1042,9 +1117,42 @@ router.patch("/:id", async (req, res) => {
     // ── Admin-only: move lot to a different workspace ──
     const moveTarget = String(body.moveToBusinessOwnerId || "").trim();
     if (moveTarget && !isParty(req.user) && moveTarget !== String(existing.businessOwnerId || "")) {
-      const mongoose = require("mongoose");
       if (!mongoose.Types.ObjectId.isValid(moveTarget)) {
         return res.status(400).json({ message: "Invalid target workspace id" });
+      }
+      const checkLotIds = [String(existing._id)];
+      if (existing.linkedLotId) checkLotIds.push(String(existing.linkedLotId));
+      const blockingBill = await OwnerBill.findOne({
+        userId,
+        $or: [
+          ...(existing.ownerBillId ? [{ _id: existing.ownerBillId }] : []),
+          { "lots.lotId": { $in: checkLotIds } },
+        ],
+      })
+        .select("bookNo billNo")
+        .lean();
+      if (blockingBill) {
+        return res.status(409).json({
+          message: `Cannot move workspace: lot belongs to Owner Bill #${blockingBill.billNo} (Book ${blockingBill.bookNo}). Remove it from that bill first.`,
+        });
+      }
+      if (
+        existing.ownerBillId ||
+        existing.billedInBillNo ||
+        (existing.linkedLotId &&
+          (await GhausiaLot.exists({
+            _id: existing.linkedLotId,
+            userId,
+            $or: [
+              { ownerBillId: { $ne: null } },
+              { billedInBillNo: { $nin: [null, ""] } },
+            ],
+          })))
+      ) {
+        return res.status(409).json({
+          message:
+            "Cannot move workspace: lot or its linked component is already billed in an Owner Bill.",
+        });
       }
       const BusinessOwner = require("../models/BusinessOwner");
       const targetBiz = await BusinessOwner.findOne({
@@ -1173,17 +1281,29 @@ router.patch("/:id", async (req, res) => {
     let newDupattaLot = null;
     let dupattaToDelete = null;
     let updatedLinkedLot = null;
+    let pendingRelinkDupatta = null;
+    let pendingLinkedUpdate = null;
+    let pendingSyncMainPieces = null;
 
     const isMainComponent = !existing.suitComponent || existing.suitComponent === "main";
+    const resolveEffectiveBillingChoice = () => {
+      if (payload.ownerBillingChoice !== undefined) {
+        return payload.ownerBillingChoice === "combined" ? "combined" : "separate";
+      }
+      return existing.ownerBillingChoice === "combined" ? "combined" : "separate";
+    };
 
     if ((existing.suitType !== "3-piece" || !existing.linkedLotId) && payload.suitType === "3-piece" && body.dupattaDetails && isMainComponent) {
       const dupattaDetails = body.dupattaDetails;
+      const effectiveBillingChoice = resolveEffectiveBillingChoice();
       payload.suitComponent = "main";
+      payload.ownerBillingChoice = effectiveBillingChoice;
 
       let dupattaLotData = {
         ...payload,
         suitComponent: "dupatta",
         suitType: "3-piece",
+        ownerBillingChoice: effectiveBillingChoice,
         userId,
         businessOwnerId: effectiveBizOwnerId,
         status: "pending",
@@ -1195,7 +1315,7 @@ router.patch("/:id", async (req, res) => {
         rejectionNote: ""
       };
 
-      const baseLotNum = dupattaLotData.lotNumber || "";
+      const baseLotNum = dupattaLotData.lotNumber || existing.lotNumber || "";
       const formattedLotNum = !baseLotNum
         ? ""
         : baseLotNum.endsWith("-D")
@@ -1204,30 +1324,37 @@ router.patch("/:id", async (req, res) => {
       dupattaLotData.lotNumber = formattedLotNum;
       dupattaLotData.lotNo = formattedLotNum;
 
-      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId) : "";
+      dupattaLotData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId).trim() : "";
       if (dupattaLotData.partyId) {
         dupattaLotData.partyName = await resolvePartyName(dupattaLotData.partyId, dupattaDetails.partyName, userId);
       } else {
         dupattaLotData.partyName = "Unknown";
       }
-      if (dupattaDetails.rate != null) dupattaLotData.rate = Number(dupattaDetails.rate);
+      const dupRate = toFiniteNonNeg(dupattaDetails.rate);
+      if (dupRate !== null) dupattaLotData.rate = dupRate;
       if (dupattaDetails.fabric) {
         dupattaLotData.fabric = dupattaDetails.fabric;
         dupattaLotData.itemType = dupattaDetails.fabric;
       }
-      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
-        dupattaLotData.quantity = Number(dupattaDetails.quantity);
-        dupattaLotData.pieces = Number(dupattaDetails.quantity);
+      const dupQty = toFiniteNonNeg(dupattaDetails.quantity);
+      if (dupQty !== null) {
+        dupattaLotData.quantity = dupQty;
+        dupattaLotData.pieces = dupQty;
       }
 
-      if (payload.ownerBillingChoice === "combined") {
-        payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
+      const dupBill = toFiniteNonNeg(dupattaDetails.billAmount) ?? 0;
+      if (effectiveBillingChoice === "combined") {
+        const mainBaseBill =
+          payload.billAmount !== undefined
+            ? (toFiniteNonNeg(payload.billAmount) ?? 0)
+            : Number(existing.billAmount || 0);
+        payload.billAmount = mainBaseBill + dupBill;
         payload.totalAmount = payload.billAmount;
         dupattaLotData.billAmount = 0;
         dupattaLotData.totalAmount = 0;
       } else {
-        dupattaLotData.billAmount = Number(dupattaDetails.billAmount || 0);
-        dupattaLotData.totalAmount = dupattaLotData.billAmount;
+        dupattaLotData.billAmount = dupBill;
+        dupattaLotData.totalAmount = dupBill;
       }
 
       const checkIsRework = payload.isRework !== undefined ? payload.isRework : existing.isRework;
@@ -1249,26 +1376,7 @@ router.patch("/:id", async (req, res) => {
 
       if (existingDupatta) {
         payload.linkedLotId = existingDupatta._id;
-        existingDupatta.linkedLotId = existing._id;
-        if (dupattaLotData.partyId !== undefined) existingDupatta.partyId = dupattaLotData.partyId;
-        if (dupattaLotData.partyName !== undefined) existingDupatta.partyName = dupattaLotData.partyName;
-        if (dupattaLotData.rate !== undefined) existingDupatta.rate = dupattaLotData.rate;
-        if (dupattaLotData.fabric !== undefined) {
-          existingDupatta.fabric = dupattaLotData.fabric;
-          existingDupatta.itemType = dupattaLotData.itemType;
-        }
-        if (dupattaLotData.quantity !== undefined) {
-          existingDupatta.quantity = dupattaLotData.quantity;
-          existingDupatta.pieces = dupattaLotData.pieces;
-        }
-        if (dupattaLotData.billAmount !== undefined) {
-          existingDupatta.billAmount = dupattaLotData.billAmount;
-          existingDupatta.totalAmount = dupattaLotData.totalAmount;
-        }
-        await existingDupatta.save();
-        await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
-        emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
-        updatedLinkedLot = existingDupatta;
+        pendingRelinkDupatta = { existingDupatta, dupattaLotData };
       } else {
         await ensureLotNumberUniqueInCollection(
           userId,
@@ -1283,36 +1391,60 @@ router.patch("/:id", async (req, res) => {
         payload.linkedLotId = newDupattaLot._id;
         newDupattaLot.linkedLotId = existing._id;
       }
-    } else if (existing.suitType === "3-piece" && payload.suitType === "3-piece" && existing.linkedLotId && isMainComponent) {
+    } else if (existing.suitType === "3-piece" && (payload.suitType === undefined || payload.suitType === "3-piece") && existing.linkedLotId && isMainComponent) {
       const dupattaDetails = body.dupattaDetails || {};
+      const effectiveBillingChoice = resolveEffectiveBillingChoice();
       let dupattaUpdateData = {};
 
+      if (payload.ownerBillingChoice !== undefined) {
+        payload.ownerBillingChoice = effectiveBillingChoice;
+        dupattaUpdateData.ownerBillingChoice = effectiveBillingChoice;
+      }
+
       if (dupattaDetails.partyId !== undefined) {
-        dupattaUpdateData.partyId = String(dupattaDetails.partyId);
+        dupattaUpdateData.partyId = dupattaDetails.partyId ? String(dupattaDetails.partyId).trim() : "";
         if (dupattaUpdateData.partyId) {
           dupattaUpdateData.partyName = await resolvePartyName(dupattaUpdateData.partyId, dupattaDetails.partyName, userId);
         } else {
           dupattaUpdateData.partyName = "Unknown";
         }
       }
-      if (dupattaDetails.rate != null) dupattaUpdateData.rate = Number(dupattaDetails.rate);
+      const dupRate = toFiniteNonNeg(dupattaDetails.rate);
+      if (dupRate !== null) dupattaUpdateData.rate = dupRate;
       if (dupattaDetails.fabric) {
         dupattaUpdateData.fabric = dupattaDetails.fabric;
         dupattaUpdateData.itemType = dupattaDetails.fabric;
       }
-      if (dupattaDetails.quantity != null && dupattaDetails.quantity !== "") {
-        dupattaUpdateData.quantity = Number(dupattaDetails.quantity);
-        dupattaUpdateData.pieces = Number(dupattaDetails.quantity);
+      const dupQty = toFiniteNonNeg(dupattaDetails.quantity);
+      if (dupQty !== null) {
+        dupattaUpdateData.quantity = dupQty;
+        dupattaUpdateData.pieces = dupQty;
       }
 
-      if (payload.ownerBillingChoice === "combined") {
-        payload.billAmount = Number(payload.billAmount) + Number(dupattaDetails.billAmount || 0);
-        payload.totalAmount = payload.billAmount;
-        dupattaUpdateData.billAmount = 0;
-        dupattaUpdateData.totalAmount = 0;
-      } else {
-        dupattaUpdateData.billAmount = Number(dupattaDetails.billAmount || 0);
-        dupattaUpdateData.totalAmount = dupattaUpdateData.billAmount;
+      const hasDupattaBill =
+        Object.prototype.hasOwnProperty.call(dupattaDetails, "billAmount") &&
+        dupattaDetails.billAmount !== "" &&
+        dupattaDetails.billAmount !== null &&
+        dupattaDetails.billAmount !== undefined;
+      if (effectiveBillingChoice === "combined") {
+        if (hasDupattaBill || payload.billAmount !== undefined) {
+          const dupBill = hasDupattaBill ? (toFiniteNonNeg(dupattaDetails.billAmount) ?? 0) : 0;
+          const mainBaseBill =
+            payload.billAmount !== undefined
+              ? (toFiniteNonNeg(payload.billAmount) ?? 0)
+              : Number(existing.billAmount || 0);
+          payload.billAmount = mainBaseBill + dupBill;
+          payload.totalAmount = payload.billAmount;
+          dupattaUpdateData.billAmount = 0;
+          dupattaUpdateData.totalAmount = 0;
+        } else if (payload.ownerBillingChoice === "combined") {
+          dupattaUpdateData.billAmount = 0;
+          dupattaUpdateData.totalAmount = 0;
+        }
+      } else if (hasDupattaBill) {
+        const dupBill = toFiniteNonNeg(dupattaDetails.billAmount) ?? 0;
+        dupattaUpdateData.billAmount = dupBill;
+        dupattaUpdateData.totalAmount = dupBill;
       }
 
       if (payload.lotNumber !== undefined) {
@@ -1368,14 +1500,8 @@ router.patch("/:id", async (req, res) => {
         }
       }
 
-      updatedLinkedLot = await GhausiaLot.findOneAndUpdate(
-        { _id: existing.linkedLotId, userId },
-        dupattaUpdateData,
-        { new: true },
-      );
-      if (updatedLinkedLot) {
-        await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
-        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
+      if (Object.keys(dupattaUpdateData).length > 0) {
+        pendingLinkedUpdate = dupattaUpdateData;
       }
     } else if (existing.suitType === "3-piece" && payload.suitType !== undefined && payload.suitType !== "3-piece" && isMainComponent) {
       payload.suitComponent = "main";
@@ -1385,17 +1511,10 @@ router.patch("/:id", async (req, res) => {
         dupattaToDelete = existing.linkedLotId;
       }
     } else if (payload.syncMainLotPieces && existing.suitComponent === "dupatta" && existing.linkedLotId && payload.pieces !== undefined) {
-      updatedLinkedLot = await GhausiaLot.findOneAndUpdate(
-        { _id: existing.linkedLotId, userId },
-        {
-          pieces: payload.pieces,
-          quantity: payload.quantity,
-        },
-        { new: true },
-      );
-      if (updatedLinkedLot) {
-        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
-      }
+      pendingSyncMainPieces = {
+        pieces: payload.pieces,
+        quantity: payload.quantity,
+      };
     }
 
     const merged = { ...existing.toObject(), ...payload };
@@ -1447,13 +1566,73 @@ router.patch("/:id", async (req, res) => {
       }
     }
 
-    const lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
-      new: true,
-      runValidators: true,
-    });
-    if (!lot) {
-      return res.status(404).json({ message: "Lot not found" });
+    if (newDupattaLot) {
+      await newDupattaLot.save();
     }
+
+    let lot;
+    try {
+      lot = await GhausiaLot.findOneAndUpdate(lotQuery, payload, {
+        new: true,
+        runValidators: true,
+      });
+      if (!lot) {
+        if (newDupattaLot) {
+          await GhausiaLot.findByIdAndDelete(newDupattaLot._id).catch(() => {});
+        }
+        return res.status(404).json({ message: "Lot not found" });
+      }
+    } catch (mainUpdateErr) {
+      if (newDupattaLot) {
+        await GhausiaLot.findByIdAndDelete(newDupattaLot._id).catch(() => {});
+      }
+      throw mainUpdateErr;
+    }
+
+    if (pendingRelinkDupatta) {
+      const { existingDupatta, dupattaLotData } = pendingRelinkDupatta;
+      existingDupatta.linkedLotId = lot._id;
+      if (dupattaLotData.ownerBillingChoice !== undefined) existingDupatta.ownerBillingChoice = dupattaLotData.ownerBillingChoice;
+      if (dupattaLotData.partyId !== undefined) existingDupatta.partyId = dupattaLotData.partyId;
+      if (dupattaLotData.partyName !== undefined) existingDupatta.partyName = dupattaLotData.partyName;
+      if (dupattaLotData.rate !== undefined) existingDupatta.rate = dupattaLotData.rate;
+      if (dupattaLotData.fabric !== undefined) {
+        existingDupatta.fabric = dupattaLotData.fabric;
+        existingDupatta.itemType = dupattaLotData.itemType;
+      }
+      if (dupattaLotData.quantity !== undefined) {
+        existingDupatta.quantity = dupattaLotData.quantity;
+        existingDupatta.pieces = dupattaLotData.pieces;
+      }
+      if (dupattaLotData.billAmount !== undefined) {
+        existingDupatta.billAmount = dupattaLotData.billAmount;
+        existingDupatta.totalAmount = dupattaLotData.totalAmount;
+      }
+      await existingDupatta.save();
+      await syncPartyLedgerForLot(existingDupatta.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
+      emitOrgChange(req, "lot", { lotId: String(existingDupatta._id) });
+      updatedLinkedLot = existingDupatta;
+    } else if (pendingLinkedUpdate) {
+      updatedLinkedLot = await GhausiaLot.findOneAndUpdate(
+        { _id: existing.linkedLotId, userId },
+        pendingLinkedUpdate,
+        { new: true },
+      );
+      if (updatedLinkedLot) {
+        await syncPartyLedgerForLot(updatedLinkedLot.toObject({ virtuals: true }), userId, effectiveBizOwnerId);
+        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
+      }
+    } else if (pendingSyncMainPieces) {
+      updatedLinkedLot = await GhausiaLot.findOneAndUpdate(
+        { _id: existing.linkedLotId, userId },
+        pendingSyncMainPieces,
+        { new: true },
+      );
+      if (updatedLinkedLot) {
+        emitOrgChange(req, "lot", { lotId: String(updatedLinkedLot._id) });
+      }
+    }
+
     if (partyChanged) {
       await clearPartyOwnedEditFields({
         userId,
@@ -1469,7 +1648,6 @@ router.patch("/:id", async (req, res) => {
     const lotObj = lot.toObject({ virtuals: true });
 
     if (newDupattaLot) {
-      await newDupattaLot.save();
       await syncPartyLedgerForLot(newDupattaLot, userId, effectiveBizOwnerId);
       emitOrgChange(req, "lot", { lotId: String(newDupattaLot._id) });
     }
@@ -1485,7 +1663,7 @@ router.patch("/:id", async (req, res) => {
     // ── If lot was moved to a new workspace, migrate PartyLedger/PartyEdit + move linked lot ──
     if (moveTarget && payload.businessOwnerId === moveTarget) {
       const movedLotIds = [String(lot._id)];
-      if (existing.linkedLotId) {
+      if (existing.linkedLotId && !dupattaToDelete) {
         const linkedMoved = await GhausiaLot.findOneAndUpdate(
           { _id: existing.linkedLotId, userId },
           { businessOwnerId: moveTarget },
@@ -1493,6 +1671,7 @@ router.patch("/:id", async (req, res) => {
         );
         if (linkedMoved) {
           movedLotIds.push(String(linkedMoved._id));
+          updatedLinkedLot = linkedMoved;
           await syncPartyLedgerForLot(linkedMoved.toObject({ virtuals: true }), userId, moveTarget);
           emitOrgChange(req, "lot", { lotId: String(linkedMoved._id) });
         }
@@ -1547,15 +1726,18 @@ router.patch("/:id", async (req, res) => {
         ...(linkPathStr && { linkPath: linkPathStr }),
       });
     }
-    if (newDupattaLot || updatedLinkedLot) {
+    if (newDupattaLot || updatedLinkedLot || dupattaToDelete) {
       const responseLots = [lotObj];
       if (newDupattaLot) responseLots.push(newDupattaLot.toObject({ virtuals: true }));
       if (updatedLinkedLot) responseLots.push(updatedLinkedLot.toObject({ virtuals: true }));
-      res.json(
-        isParty(req.user)
-          ? responseLots.map(stripPrivateLotFieldsForParty)
-          : responseLots,
-      );
+      const payloadOut = isParty(req.user)
+        ? responseLots.map(stripPrivateLotFieldsForParty)
+        : responseLots;
+      if (dupattaToDelete) {
+        res.json({ lots: payloadOut, deletedLinkedId: String(dupattaToDelete) });
+      } else {
+        res.json(payloadOut);
+      }
     } else {
       res.json(isParty(req.user) ? stripPrivateLotFieldsForParty(lot) : lot);
     }
@@ -1566,15 +1748,7 @@ router.patch("/:id", async (req, res) => {
       void notifyLotDispatched({ lot: dLot, ownerId: userId });
     }
   } catch (error) {
-    if (error.code === "DUPLICATE_LOT_NUMBER") {
-      return res.status(409).json({ message: error.message });
-    }
-    if (error.code === "MISSING_BUSINESS_OWNER") {
-      return res.status(400).json({ message: error.message });
-    }
-    res
-      .status(400)
-      .json({ message: "Error updating lot", error: error.message });
+    return sendLotError(res, error, "Error updating lot");
   }
 });
 
@@ -1642,19 +1816,20 @@ router.delete("/:id", async (req, res) => {
 
     let deletedLinkedId = null;
     let updatedLinkedLot = null;
+    let deletedDupattaDoc = null;
 
     // Delete / downgrade linked lot if it exists
     if (lot.linkedLotId) {
       if (!lot.suitComponent || lot.suitComponent === "main") {
-        await GhausiaLot.findOneAndDelete({ _id: lot.linkedLotId, userId });
+        deletedDupattaDoc = await GhausiaLot.findOneAndDelete({ _id: lot.linkedLotId, userId });
         await Promise.all([
           PartyLedger.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
           PartyEdit.deleteMany({ lotId: String(lot.linkedLotId), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
         ]);
         emitOrgChange(req, "lot", {
           lotId: String(lot.linkedLotId),
-          partyId: lotPartyId,
-          adminOnly: !lotPartyId,
+          partyId: String(deletedDupattaDoc?.partyId || lotPartyId),
+          adminOnly: !(deletedDupattaDoc?.partyId || lotPartyId),
         });
         deletedLinkedId = String(lot.linkedLotId);
       } else if (lot.suitComponent === "dupatta") {
@@ -1677,29 +1852,40 @@ router.delete("/:id", async (req, res) => {
         userId,
       });
       if (orphanDupatta) {
+        deletedDupattaDoc = orphanDupatta;
         await Promise.all([
           PartyLedger.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
           PartyEdit.deleteMany({ lotId: String(orphanDupatta._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
         ]);
         emitOrgChange(req, "lot", {
           lotId: String(orphanDupatta._id),
-          partyId: lotPartyId,
-          adminOnly: !lotPartyId,
+          partyId: String(orphanDupatta.partyId || lotPartyId),
+          adminOnly: !(orphanDupatta.partyId || lotPartyId),
         });
         deletedLinkedId = String(orphanDupatta._id);
       }
     }
 
-    // Clear stale linkedLot string refs on standalone Payment rows without wiping payment amounts
-    const baseLotRef = String(lot.lotNo || lot.lotNumber || "").trim();
+    // Clear stale linkedLot string refs strictly for the deleted lot(s) without cross-clearing Rework/Main variants
     const linkedKeysToClear = [];
-    if (baseLotRef) {
-      linkedKeysToClear.push(
-        lot.isRework ? `${baseLotRef} (Rework)` : baseLotRef,
-        `${baseLotRef}-D`,
-        `${baseLotRef} (Rework)-D`,
-      );
-    }
+    const appendDeletedLotKeys = (doc) => {
+      const raw = String(doc?.lotNo || doc?.lotNumber || "").trim();
+      if (!raw) return;
+      const bare = raw.replace(/-D$/i, "");
+      if (doc?.suitComponent === "dupatta") {
+        if (doc?.isRework) {
+          linkedKeysToClear.push(`${bare}-D (Rework)`, `${bare} (Rework)-D`);
+        } else {
+          linkedKeysToClear.push(`${bare}-D`);
+        }
+      } else if (doc?.isRework) {
+        linkedKeysToClear.push(`${bare} (Rework)`);
+      } else {
+        linkedKeysToClear.push(bare);
+      }
+    };
+    appendDeletedLotKeys(lot);
+    if (deletedDupattaDoc) appendDeletedLotKeys(deletedDupattaDoc);
 
     await Promise.all([
       PartyLedger.deleteMany({ lotId: String(lot._id), userId, ...(lotBizId ? { businessOwnerId: lotBizId } : {}) }),
@@ -1728,6 +1914,16 @@ router.delete("/:id", async (req, res) => {
       adminOnly: !lot.partyId,
     });
     res.json(responsePayload);
+
+    if (lot.partyId) {
+      void notifyLotDeleted({ lot: lot.toObject ? lot.toObject() : lot, ownerId: userId });
+    }
+    if (deletedDupattaDoc?.partyId) {
+      void notifyLotDeleted({
+        lot: deletedDupattaDoc.toObject ? deletedDupattaDoc.toObject() : deletedDupattaDoc,
+        ownerId: userId,
+      });
+    }
   } catch (error) {
     res
       .status(500)

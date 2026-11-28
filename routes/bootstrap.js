@@ -247,7 +247,7 @@ router.get("/", async (req, res) => {
     const isWorkspaceScopedOnly = scopeOnly === "workspace";
     
     // Cache key specific to user and payload shape
-    const cacheKey = `bootstrap:${req.user._id}:${minimal}:${includeReceipts}:${scopeOnly}:${req.query.scope || ""}:${req.query.partyScope || ""}:${req.businessOwnerId || ""}`;
+    const cacheKey = `bootstrap:${req.user._id}:${req.user.partyId || ""}:${minimal}:${includeReceipts}:${scopeOnly}:${req.query.scope || ""}:${req.query.partyScope || ""}:${req.businessOwnerId || ""}`;
     const cached = getCached("bootstrap", cacheKey);
     if (cached) return res.json(cached);
 
@@ -344,7 +344,7 @@ router.get("/", async (req, res) => {
         reportingPayments,
         reportingPartyEdits,
       ] = await Promise.all([
-        Party.find({ userId }).sort({ name: 1 }).lean(),
+        Party.find({ userId, deletedAt: null }).sort({ name: 1 }).lean(),
         fetchGhausiaLots(
           req,
           { scopeAll: false, partyScopeAll: false },

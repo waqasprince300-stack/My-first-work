@@ -1,6 +1,29 @@
 const { getDataOwnerId } = require("./access");
 const { clearCache } = require("./requestCache");
 
+let realtimeIo = null;
+
+/** Register the initialized Socket.io server instance for background notification helpers. */
+const setRealtimeIo = (io) => {
+  realtimeIo = io || null;
+};
+
+/** Notify a single user's connected clients after a persistent notification document is created. */
+const emitNotificationRefresh = (targetUserId, extra = {}) => {
+  try {
+    if (!realtimeIo || !targetUserId) return;
+    clearCache("bootstrap");
+    realtimeIo.to(userRoom(String(targetUserId))).emit("data:changed", {
+      type: "notification",
+      targetUserId: String(targetUserId),
+      at: Date.now(),
+      ...extra,
+    });
+  } catch {
+    /* best-effort only */
+  }
+};
+
 /** Socket.io room helpers — separate admin, targeted party, all-parties (global announcements only), and user rooms. */
 const orgRoom = (ownerId) => `org:${String(ownerId)}`;
 const adminRoom = (ownerId) => `admin:${String(ownerId)}`;
@@ -106,4 +129,6 @@ module.exports = {
   userRoom,
   disconnectUserSockets,
   emitOrgChange,
+  setRealtimeIo,
+  emitNotificationRefresh,
 };

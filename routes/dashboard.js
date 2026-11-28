@@ -10,6 +10,7 @@ const {
   getPartyPaymentOrConditions,
   isParty,
   isTenantAdmin,
+  toAggregateObjectIdMatch,
 } = require("../utils/access");
 
 const normalizeStatusKey = (status) => {
@@ -55,6 +56,8 @@ router.get("/summary", async (req, res) => {
   try {
     const lotFilter = lotFilterForSummary(req);
     const paymentFilter = paymentFilterForSummary(req);
+    const aggLotFilter = toAggregateObjectIdMatch(lotFilter);
+    const aggPaymentFilter = toAggregateObjectIdMatch(paymentFilter);
     const userId = getDataOwnerId(req.user);
 
     const partyCountPromise = isParty(req.user)
@@ -69,7 +72,7 @@ router.get("/summary", async (req, res) => {
     const [statusAgg, paymentAgg, paymentDetailAgg, activePartyIds, totalParties] =
       await Promise.all([
         GhausiaLot.aggregate([
-          { $match: lotFilter },
+          { $match: aggLotFilter },
           {
             $group: {
               _id: "$status",
@@ -79,7 +82,7 @@ router.get("/summary", async (req, res) => {
           },
         ]),
         Payment.aggregate([
-          { $match: paymentFilter },
+          { $match: aggPaymentFilter },
           {
             $group: {
               _id: "$type",
@@ -89,7 +92,7 @@ router.get("/summary", async (req, res) => {
           },
         ]),
         Payment.aggregate([
-          { $match: paymentFilter },
+          { $match: aggPaymentFilter },
           {
             $project: {
               type: 1,

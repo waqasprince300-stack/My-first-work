@@ -2,10 +2,17 @@ const express = require("express");
 const router = express.Router();
 const Notification = require("../models/Notification");
 const Announcement = require("../models/Announcement");
-const { getDataOwnerId, isParty, isTenantAdmin } = require("../utils/access");
+const {
+  getDataOwnerId,
+  isParty,
+  isTenantAdmin,
+  validateObjectIdParam,
+} = require("../utils/access");
 const { emitOrgChange } = require("../utils/realtime");
 const Party = require("../models/Party");
 const { calculatePartyMotivation, calculateAllPartiesMotivation } = require("../utils/partyMotivation");
+
+router.param("id", validateObjectIdParam);
 
 const serialize = (doc) => {
   const o = doc.toObject ? doc.toObject() : doc;

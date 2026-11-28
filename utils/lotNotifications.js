@@ -1,6 +1,7 @@
 const User = require("../models/User");
 const Notification = require("../models/Notification");
 const { getMailConfigError, sendLotNotificationEmail } = require("./email");
+const { emitNotificationRefresh } = require("./realtime");
 
 const DEDUPE_WINDOW_MS = 5 * 60 * 1000;
 
@@ -121,6 +122,11 @@ async function createAndEmailNotification({
     lotNumber: String(lot?.lotNumber || lot?.lotNo || "").trim(),
     businessOwnerId: String(lot?.businessOwnerId || "").trim(),
     linkPath,
+  });
+
+  emitNotificationRefresh(user._id, {
+    action: type,
+    lotId,
   });
 
   const fullUrl = `${frontendBaseUrl()}${linkPath.startsWith("/") ? linkPath : `/${linkPath}`}`;

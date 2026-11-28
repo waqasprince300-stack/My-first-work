@@ -2,10 +2,14 @@ const express = require("express");
 const router = express.Router();
 const PartyLedger = require("../models/PartyLedger");
 const {
+  getBusinessOwnerFilter,
   getDataOwnerId,
   getScopedFilter,
   requireAdminUser,
+  validateObjectIdParam,
 } = require("../utils/access");
+
+router.param("id", validateObjectIdParam);
 
 const stripOwnership = ({
   userId: _userId,
@@ -58,8 +62,14 @@ router.post("/", async (req, res) => {
     const savedEntry = await entry.save();
     res.status(201).json(savedEntry);
   } catch (error) {
+    const status =
+      error?.code === 11000
+        ? 409
+        : error?.name === "ValidationError" || error?.name === "CastError"
+          ? 400
+          : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error creating ledger entry", error: error.message });
   }
 });
@@ -72,7 +82,7 @@ router.patch("/:id", async (req, res) => {
       {
         _id: req.params.id,
         userId: getDataOwnerId(req.user),
-        businessOwnerId: req.businessOwnerId,
+        ...getBusinessOwnerFilter(req),
       },
       stripOwnership(req.body),
       { new: true, runValidators: true },
@@ -82,8 +92,14 @@ router.patch("/:id", async (req, res) => {
     }
     res.json(entry);
   } catch (error) {
+    const status =
+      error?.code === 11000
+        ? 409
+        : error?.name === "ValidationError" || error?.name === "CastError"
+          ? 400
+          : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error updating ledger entry", error: error.message });
   }
 });

@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const OwnerBill = require("../models/OwnerBill");
 const Payment = require("../models/Payment");
 const GhausiaLot = require("../models/GhausiaLot");
+const PartyLedger = require("../models/PartyLedger");
 const { getDataOwnerId, requireAdminUser } = require("../utils/access");
 const { emitOrgChange } = require("../utils/realtime");
 const { toDateOrNow, toIsoDateString } = require("../utils/dateHelpers");
@@ -51,7 +52,7 @@ const sanitizeBillPayload = (body = {}) => {
     const rate = Math.max(0, toSafeNum(l?.rate));
     const amount = Math.max(0, toSafeNum(l?.amount));
     return {
-      lotId: String(l?.lotId || l?.id || l._id || "").trim(),
+      lotId: String(l?.lotId || "").trim(),
       lotNo: String(l?.lotNo || l?.lotNumber || "").trim(),
       designNo: String(l?.designNo || "").trim(),
       suitComponent: String(l?.suitComponent || "main").trim(),
@@ -76,7 +77,7 @@ const sanitizeBillPayload = (body = {}) => {
   const paymentsReceived = (
     Array.isArray(body.paymentsReceived) ? body.paymentsReceived : []
   ).map((p) => ({
-    paymentId: String(p?.paymentId || p?.id || p?._id || "").trim(),
+    paymentId: String(p?.paymentId || "").trim(),
     date: String(p?.date || "").trim() || date,
     amount: Math.max(0, toSafeNum(p?.amount)),
     note: String(p?.note || "Online / Cash received"),
@@ -129,7 +130,7 @@ const sanitizeBillPayload = (body = {}) => {
 const bizScopeFilter = (bizId) => (bizId ? { businessOwnerId: bizId } : {});
 
 const buildSingleLotFilter = (item, userId, bizId) => {
-  const singleId = String(item?.lotId || item?._id || item?.id || "").trim();
+  const singleId = String(item?.lotId || "").trim();
   if (isValidObjectId(singleId)) {
     return {
       userId,
@@ -176,6 +177,9 @@ async function markIncludedLotsForBill(bill, userId, bizId, now) {
         item.preBillAmount = Number(tLot.billAmount ?? 0);
         item.isRework = Boolean(tLot.isRework);
         billLotsMutated = true;
+      } else if (Boolean(item.isRework) !== Boolean(tLot.isRework)) {
+        item.isRework = Boolean(tLot.isRework);
+        billLotsMutated = true;
       }
 
       const itemRate = Number(item.rate || 0);
@@ -200,6 +204,17 @@ async function markIncludedLotsForBill(bill, userId, bizId, now) {
       const uRes = await GhausiaLot.updateOne({ _id: tLot._id }, { $set: setPatch });
       modifiedLotsCount += uRes.modifiedCount || 0;
 
+      await PartyLedger.updateMany(
+        { userId, lotId: String(tLot._id) },
+        {
+          $set: {
+            status: "completed",
+            ...(setPatch.billAmount !== undefined ? { billAmount: setPatch.billAmount } : {}),
+            ...(setPatch.receivedBackDate ? { completeDate: setPatch.receivedBackDate } : {}),
+          },
+        },
+      );
+
       // Complete combined Rs 0 dupatta child alongside parent Kameez lot
       if (tLot.suitComponent !== "dupatta" && tLot.linkedLotId) {
         const child = await GhausiaLot.findOne({
@@ -222,6 +237,16 @@ async function markIncludedLotsForBill(bill, userId, bizId, now) {
           if (!child.receivedBackDate) childPatch.receivedBackDate = toDateOrNow(bill.date);
           const cu = await GhausiaLot.updateOne({ _id: child._id }, { $set: childPatch });
           modifiedLotsCount += cu.modifiedCount || 0;
+
+          await PartyLedger.updateMany(
+            { userId, lotId: String(child._id) },
+            {
+              $set: {
+                status: "completed",
+                ...(childPatch.receivedBackDate ? { completeDate: childPatch.receivedBackDate } : {}),
+              },
+            },
+          );
         }
       }
     }
@@ -235,7 +260,7 @@ async function markIncludedLotsForBill(bill, userId, bizId, now) {
 }
 
 /** Restore pre-bill rate/billAmount on lots removed from or unlinked by deleting an OwnerBill. */
-async function restoreRevertedLotsFromBill(queryFilter, bill) {
+async function restoreRevertedLotsFromBill(queryFilter, bill, userId) {
   const prevByLotId = new Map();
   for (const item of bill?.lots || []) {
     if (item?.lotId && item.preBillAmount != null) {
@@ -267,7 +292,143 @@ async function restoreRevertedLotsFromBill(queryFilter, bill) {
         },
       },
     );
+    await PartyLedger.updateMany(
+      { userId, lotId: String(l._id) },
+      {
+        $set: {
+          status: "received back",
+          ...(prev ? { billAmount: prev.billAmount } : {}),
+        },
+      },
+    );
   }
+}
+
+function sendBillSaveError(res, error, fallbackMessage) {
+  if (error && error.code === 11000) {
+    return res.status(409).json({
+      message:
+        "Yeh Bill number aur Book number pehle se database mein mojood hai!",
+    });
+  }
+  const statusCode =
+    error?.name === "ValidationError" || error?.name === "CastError"
+      ? 400
+      : 500;
+  return res
+    .status(statusCode)
+    .json({ message: fallbackMessage, error: error?.message || "Unknown error" });
+}
+
+/** Clean up finalized bill ledger/lot links when deleting a bill or reverting it to draft. */
+async function rollbackFinalizedBillLinks(req, bill, matchBillRef, userId) {
+  const refBillNo = matchBillRef.billNo;
+  const refBookNo = matchBillRef.bookNo;
+  const bookMatch =
+    Number(refBookNo) === 1
+      ? [{ billedInBookNo: refBookNo }, { billedInBookNo: null }]
+      : [{ billedInBookNo: refBookNo }];
+
+  try {
+    await Payment.deleteMany({
+      userId,
+      businessOwnerId: bill.businessOwnerId,
+      $or: [
+        { type: "Tally", ownerBillId: bill._id },
+        {
+          type: "Tally",
+          linkedLot: `Bill #${refBillNo}`,
+          ownerBillId: null,
+          date: matchBillRef.date,
+          $or: bookMatch,
+        },
+        { type: "Paid", ownerBillId: bill._id },
+        {
+          type: "Paid",
+          party: "Owner",
+          billedInBillNo: refBillNo,
+          ownerBillId: null,
+          $or: bookMatch,
+        },
+        {
+          type: "Received",
+          ownerBillId: bill._id,
+          $or: [
+            { isBillManualCash: true },
+            {
+              note: {
+                $regex: new RegExp(
+                  `^Cash received on Bill #${refBillNo}$|\\(Bill #${refBillNo}\\)$`,
+                  "i",
+                ),
+              },
+            },
+          ],
+        },
+      ],
+    });
+  } catch (cleanPayErr) {
+    console.warn(
+      "Could not delete auto bill payment entries:",
+      cleanPayErr.message,
+    );
+  }
+
+  try {
+    await Payment.updateMany(
+      {
+        userId,
+        ...bizScopeFilter(bill.businessOwnerId),
+        $or: [
+          { ownerBillId: bill._id },
+          { billedInBillNo: refBillNo, billedInBookNo: refBookNo },
+        ],
+      },
+      {
+        $set: {
+          ownerBillId: null,
+          billedInBillNo: null,
+          billedInBookNo: null,
+        },
+      },
+    );
+  } catch (unlinkErr) {
+    console.warn(
+      "Could not unlink payments on bill rollback:",
+      unlinkErr.message,
+    );
+  }
+
+  try {
+    await restoreRevertedLotsFromBill(
+      {
+        userId,
+        $and: [
+          bizScopeFilter(bill.businessOwnerId),
+          {
+            $or: [
+              { ownerBillId: bill._id },
+              {
+                billedInBillNo: refBillNo,
+                billedInBookNo: refBookNo,
+              },
+            ],
+          },
+        ],
+      },
+      matchBillRef,
+      userId,
+    );
+    emitOrgChange(req, "lot", { action: "lots_unbilled", adminOnly: true });
+  } catch (revertErr) {
+    console.warn("Could not revert lots on bill rollback:", revertErr.message);
+  }
+
+  emitOrgChange(req, "payment", {
+    action: "payment_deleted",
+    linkPath: "/payments",
+    adminOnly: true,
+  });
 }
 
 // 1. Get bills for owner / workspace + compute next defaults
@@ -297,12 +458,10 @@ router.get("/", async (req, res) => {
       billedPaymentIds: [],
     };
 
-    const finalizedBills = bills.filter((b) => b.status !== "draft");
-    if (finalizedBills.length > 0) {
-      const latest = finalizedBills[0]; // newest finalized bill by (bookNo, billNo)
-      const curBook = Number(latest.bookNo || 1);
-      const curBillNo = Number(latest.billNo || 1);
-
+    if (bills.length > 0) {
+      const highest = bills[0];
+      const curBook = Number(highest.bookNo || 1);
+      const curBillNo = Number(highest.billNo || 1);
       if (curBillNo >= 100) {
         nextDefaults.nextBookNo = curBook + 1;
         nextDefaults.nextBillNo = 1;
@@ -310,6 +469,11 @@ router.get("/", async (req, res) => {
         nextDefaults.nextBookNo = curBook;
         nextDefaults.nextBillNo = curBillNo + 1;
       }
+    }
+
+    const finalizedBills = bills.filter((b) => b.status !== "draft");
+    if (finalizedBills.length > 0) {
+      const latest = finalizedBills[0];
       nextDefaults.lastSabqaBaqaya = Number(latest.grandTotalBaqaya || 0);
       nextDefaults.lastBillDate = latest.date || null;
       nextDefaults.lastBillId = String(latest._id);
@@ -319,7 +483,7 @@ router.get("/", async (req, res) => {
     const billedPaymentIds = new Set();
     finalizedBills.forEach((b) => {
       (b.paymentsReceived || []).forEach((p) => {
-        const pid = String(p.paymentId || p._id || p.id || "").trim();
+        const pid = String(p.paymentId || "").trim();
         if (pid && isValidObjectId(pid)) billedPaymentIds.add(pid);
       });
     });
@@ -441,11 +605,15 @@ router.post("/", async (req, res) => {
 
       for (let i = 0; i < activePayments.length; i++) {
         const p = activePayments[i];
-        const pid = String(p.paymentId || p.id || p._id || "").trim();
+        const pid = String(p.paymentId || "").trim();
         if (pid && isValidObjectId(pid)) {
           try {
             await Payment.updateOne(
-              { _id: new mongoose.Types.ObjectId(pid), userId },
+              {
+                _id: new mongoose.Types.ObjectId(pid),
+                userId,
+                ...bizScopeFilter(bizId),
+              },
               {
                 $set: {
                   ownerBillId: saved._id,
@@ -577,15 +745,7 @@ router.post("/", async (req, res) => {
       : saved;
     res.status(201).json(normalize(finalBill || saved));
   } catch (error) {
-    if (error && error.code === 11000) {
-      return res.status(409).json({
-        message:
-          "Yeh Bill number aur Book number pehle se database mein mojood hai!",
-      });
-    }
-    res
-      .status(400)
-      .json({ message: "Error creating owner bill", error: error.message });
+    return sendBillSaveError(res, error, "Error creating owner bill");
   }
 });
 
@@ -610,10 +770,46 @@ router.patch("/:id", async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
 
-    // Merge incoming fields onto existing bill snapshot for clean partial or full edits
+    // Merge incoming fields onto existing bill snapshot while stripping subdoc _id/id and carrying pre-bill metadata
+    const prevObj = prevBill.toObject();
+    const prevLotById = new Map(
+      (prevObj.lots || [])
+        .filter((l) => l?.lotId)
+        .map((l) => [String(l.lotId), l]),
+    );
+    const stripSubdocIds = (arr, fallbackMap = null) =>
+      (Array.isArray(arr) ? arr : []).map((entry) => {
+        const clean = { ...(entry || {}) };
+        delete clean._id;
+        delete clean.id;
+        if (fallbackMap && clean.lotId) {
+          const prevItem = fallbackMap.get(String(clean.lotId));
+          if (prevItem) {
+            if (clean.preBillRate == null && prevItem.preBillRate != null) {
+              clean.preBillRate = prevItem.preBillRate;
+            }
+            if (clean.preBillAmount == null && prevItem.preBillAmount != null) {
+              clean.preBillAmount = prevItem.preBillAmount;
+            }
+            if (clean.isRework === undefined && prevItem.isRework !== undefined) {
+              clean.isRework = prevItem.isRework;
+            }
+          }
+        }
+        return clean;
+      });
     const mergedRaw = {
-      ...prevBill.toObject(),
+      ...prevObj,
       ...req.body,
+      lots: stripSubdocIds(
+        Array.isArray(req.body.lots) ? req.body.lots : prevObj.lots,
+        prevLotById,
+      ),
+      paymentsReceived: stripSubdocIds(
+        Array.isArray(req.body.paymentsReceived)
+          ? req.body.paymentsReceived
+          : prevObj.paymentsReceived,
+      ),
     };
     const cleanBody = sanitizeBillPayload(mergedRaw);
 
@@ -640,6 +836,9 @@ router.patch("/:id", async (req, res) => {
     }
 
     if (bill.status === "draft") {
+      if (prevBill.status !== "draft") {
+        await rollbackFinalizedBillLinks(req, bill, prevBill, userId);
+      }
       emitOrgChange(req, "owner_bill", {
         billId: String(bill._id),
         action: "owner_bill_updated",
@@ -675,6 +874,7 @@ router.patch("/:id", async (req, res) => {
           _id: { $nin: protectedObjectIds },
         },
         prevBill,
+        userId,
       );
 
       // Sync Paid lot settlement rows for this bill (scoped cleanly with isRework via formatLotLinkedKey)
@@ -746,13 +946,17 @@ router.patch("/:id", async (req, res) => {
 
       for (let i = 0; i < incomingPayments.length; i++) {
         const p = incomingPayments[i];
-        const pid = String(p.paymentId || p.id || p._id || "").trim();
+        const pid = String(p.paymentId || "").trim();
         if (pid && isValidObjectId(pid)) {
           const objId = new mongoose.Types.ObjectId(pid);
           activePayIds.push(objId);
 
           // Update amount/date/note ONLY if this payment was auto-created inside the bill modal
-          const existingPay = await Payment.findOne({ _id: objId, userId });
+          const existingPay = await Payment.findOne({
+            _id: objId,
+            userId,
+            ...bizScopeFilter(bill.businessOwnerId),
+          });
           if (existingPay) {
             existingPay.ownerBillId = bill._id;
             existingPay.billedInBillNo = bill.billNo;
@@ -807,6 +1011,7 @@ router.patch("/:id", async (req, res) => {
       // Delete ONLY auto-created manual cash Received payments that were removed from this bill
       await Payment.deleteMany({
         userId,
+        ...bizScopeFilter(bill.businessOwnerId),
         type: "Received",
         ownerBillId: bill._id,
         _id: { $nin: activePayIds },
@@ -827,6 +1032,7 @@ router.patch("/:id", async (req, res) => {
       await Payment.updateMany(
         {
           userId,
+          ...bizScopeFilter(bill.businessOwnerId),
           type: "Received",
           $or: [
             { ownerBillId: bill._id },
@@ -923,15 +1129,7 @@ router.patch("/:id", async (req, res) => {
       : bill;
     res.json(normalize(finalBill || bill));
   } catch (error) {
-    if (error && error.code === 11000) {
-      return res.status(409).json({
-        message:
-          "Yeh Bill number aur Book number pehle se database mein mojood hai!",
-      });
-    }
-    res
-      .status(400)
-      .json({ message: "Error updating bill", error: error.message });
+    return sendBillSaveError(res, error, "Error updating bill");
   }
 });
 
@@ -956,109 +1154,13 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ message: "Bill not found" });
     }
 
-    // Delete ONLY auto-generated rows belonging strictly to this bill (Tally, Paid lot entries, and auto manual cash)
-    try {
-      await Payment.deleteMany({
-        userId,
-        businessOwnerId: bill.businessOwnerId,
-        $or: [
-          { type: "Tally", ownerBillId: bill._id },
-          {
-            type: "Tally",
-            linkedLot: `Bill #${bill.billNo}`,
-            ownerBillId: null,
-            date: bill.date,
-          },
-          { type: "Paid", ownerBillId: bill._id },
-          {
-            type: "Paid",
-            party: "Owner",
-            billedInBillNo: bill.billNo,
-            ownerBillId: null,
-          },
-          {
-            type: "Received",
-            ownerBillId: bill._id,
-            $or: [
-              { isBillManualCash: true },
-              {
-                note: {
-                  $regex: new RegExp(
-                    `^Cash received on Bill #${bill.billNo}$|\\(Bill #${bill.billNo}\\)$`,
-                    "i"
-                  ),
-                },
-              },
-            ],
-          },
-        ],
-      });
-    } catch (cleanPayErr) {
-      console.warn(
-        "Could not delete auto bill payment entries:",
-        cleanPayErr.message
-      );
-    }
-
-    // Unlink all remaining pre-existing Received payments in this workspace so they become available again
-    try {
-      await Payment.updateMany(
-        {
-          userId,
-          ...bizScopeFilter(bill.businessOwnerId),
-          $or: [
-            { ownerBillId: bill._id },
-            { billedInBillNo: bill.billNo, billedInBookNo: bill.bookNo },
-          ],
-        },
-        {
-          $set: {
-            ownerBillId: null,
-            billedInBillNo: null,
-            billedInBookNo: null,
-          },
-        }
-      );
-    } catch (unlinkErr) {
-      console.warn(
-        "Could not unlink payments on bill delete:",
-        unlinkErr.message
-      );
-    }
-
-    // Revert lots (and pre-bill amounts) strictly linked to this bill back to 'received back' (billable)
-    try {
-      await restoreRevertedLotsFromBill(
-        {
-          userId,
-          $and: [
-            bizScopeFilter(bill.businessOwnerId),
-            {
-              $or: [
-                { ownerBillId: bill._id },
-                {
-                  billedInBillNo: bill.billNo,
-                  billedInBookNo: bill.bookNo,
-                },
-              ],
-            },
-          ],
-        },
-        bill,
-      );
-      emitOrgChange(req, "lot", { action: "lots_unbilled", adminOnly: true });
-    } catch (revertErr) {
-      console.warn("Could not revert lots on bill delete:", revertErr.message);
+    if (bill.status !== "draft") {
+      await rollbackFinalizedBillLinks(req, bill, bill, userId);
     }
 
     emitOrgChange(req, "owner_bill", {
       billId: String(bill._id),
       action: "owner_bill_deleted",
-      adminOnly: true,
-    });
-    emitOrgChange(req, "payment", {
-      action: "payment_deleted",
-      linkPath: "/payments",
       adminOnly: true,
     });
     res.json({ message: "Bill deleted successfully" });

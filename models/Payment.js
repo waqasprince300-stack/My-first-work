@@ -25,18 +25,33 @@ const paymentSchema = new mongoose.Schema(
       type: Number,
       required: true,
       validate: {
-        validator(val) {
+        async validator(val) {
           if (typeof val !== "number" || !Number.isFinite(val)) return false;
           if (val < -100000000 || val > 100000000) return false;
           const updateObj =
             typeof this.getUpdate === "function" ? this.getUpdate() : null;
           const queryObj =
             typeof this.getQuery === "function" ? this.getQuery() : null;
-          const docType =
+          let docType =
             this.type ??
             updateObj?.$set?.type ??
             updateObj?.type ??
             queryObj?.type;
+          if (!docType && queryObj && typeof this.model?.findOne === "function") {
+            if (this.op === "updateMany") {
+              const hasNonTally = await this.model.exists({
+                ...queryObj,
+                type: { $ne: "Tally" },
+              });
+              if (!hasNonTally) docType = "Tally";
+            } else {
+              const existing = await this.model
+                .findOne(queryObj)
+                .select("type")
+                .lean();
+              docType = existing?.type;
+            }
+          }
           if (docType === "Tally") return true;
           return val >= 0;
         },

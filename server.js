@@ -16,6 +16,7 @@ const {
   requireApproved,
   requireTenantAdmin,
   requireSuperAdmin,
+  isOwnerAdminApproved,
 } = require("./middleware/auth");
 const {
   resolveBusinessOwner,
@@ -141,7 +142,9 @@ const {
   allPartiesRoom,
   partyRoom,
   userRoom,
+  setRealtimeIo,
 } = require("./utils/realtime");
+setRealtimeIo(io);
 
 const { getSocketJwtSecret } = require("./utils/jwt");
 io.use(async (socket, next) => {
@@ -155,7 +158,7 @@ io.use(async (socket, next) => {
     const user = await User.findById(decoded.id)
       .select("role ownerId approvedBy status partyId")
       .lean();
-    if (user && user.status === "approved") {
+    if (user && user.status === "approved" && (await isOwnerAdminApproved(user))) {
       socket.data.ownerId = String(getDataOwnerId(user) || "");
       socket.data.userId = String(user._id);
       socket.data.role = String(user.role || "");

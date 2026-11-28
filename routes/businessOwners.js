@@ -17,6 +17,7 @@ const {
   validateObjectIdParam,
 } = require("../utils/access");
 const { clearCache } = require("../utils/requestCache");
+const { disconnectUserSockets, emitOrgChange } = require("../utils/realtime");
 
 const router = express.Router();
 router.param("id", validateObjectIdParam);
@@ -189,6 +190,8 @@ router.delete("/:id", async (req, res) => {
 
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
+      emitOrgChange(req, "users", { targetUserId: String(u._id) });
+      disconnectUserSockets(req.io, u._id);
     }
 
     return res.status(204).send();
@@ -323,12 +326,41 @@ router.delete("/:id/permanent", async (req, res) => {
       });
     }
 
+    const workspaceParties = await Party.find(workspaceFilter)
+      .select("_id name")
+      .lean();
+    const wpIds = workspaceParties.map((p) => String(p._id));
+    let referencedPartyIds = new Set();
+    if (wpIds.length > 0) {
+      const outsideQuery = {
+        userId: uid,
+        businessOwnerId: { $ne: bid },
+        partyId: { $in: wpIds },
+      };
+      const [lotRefs, payRefs, ledgerRefs] = await Promise.all([
+        GhausiaLot.distinct("partyId", outsideQuery),
+        Payment.distinct("partyId", outsideQuery),
+        PartyLedger.distinct("partyId", outsideQuery),
+      ]);
+      referencedPartyIds = new Set(
+        [...lotRefs, ...payRefs, ...ledgerRefs].map((v) => String(v || "")),
+      );
+    }
+    const deletablePartyIds = workspaceParties
+      .filter((p) => !referencedPartyIds.has(String(p._id)))
+      .map((p) => p._id);
+    const sharedParties = workspaceParties.filter((p) =>
+      referencedPartyIds.has(String(p._id)),
+    );
+
     await Promise.all([
       PartyEdit.deleteMany(workspaceFilter),
       PartyLedger.deleteMany(workspaceFilter),
       Payment.deleteMany(workspaceFilter),
       GhausiaLot.deleteMany(workspaceFilter),
-      Party.deleteMany(workspaceFilter),
+      ...(deletablePartyIds.length > 0
+        ? [Party.deleteMany({ _id: { $in: deletablePartyIds }, userId: uid })]
+        : []),
       Party.updateMany(
         { userId: uid },
         { $pull: { workspaceOverrides: { businessOwnerId: String(bid) } } }
@@ -338,6 +370,56 @@ router.delete("/:id/permanent", async (req, res) => {
       RateCalculation.deleteMany(workspaceFilter),
       SavedDesign.deleteMany(workspaceFilter),
     ]);
+
+    for (const sp of sharedParties) {
+      const refDoc =
+        (await GhausiaLot.findOne({
+          userId: uid,
+          businessOwnerId: { $ne: bid },
+          partyId: String(sp._id),
+        })
+          .select("businessOwnerId")
+          .lean()) ||
+        (await Payment.findOne({
+          userId: uid,
+          businessOwnerId: { $ne: bid },
+          partyId: String(sp._id),
+        })
+          .select("businessOwnerId")
+          .lean()) ||
+        (await PartyLedger.findOne({
+          userId: uid,
+          businessOwnerId: { $ne: bid },
+          partyId: String(sp._id),
+        })
+          .select("businessOwnerId")
+          .lean());
+      const globalDup = await Party.exists({
+        userId: uid,
+        businessOwnerId: null,
+        name: sp.name,
+        _id: { $ne: sp._id },
+      });
+      if (!globalDup) {
+        await Party.updateOne(
+          { _id: sp._id, userId: uid },
+          { $set: { businessOwnerId: null } },
+        ).catch(() => {});
+      } else if (refDoc?.businessOwnerId) {
+        const targetDup = await Party.exists({
+          userId: uid,
+          businessOwnerId: refDoc.businessOwnerId,
+          name: sp.name,
+          _id: { $ne: sp._id },
+        });
+        if (!targetDup) {
+          await Party.updateOne(
+            { _id: sp._id, userId: uid },
+            { $set: { businessOwnerId: refDoc.businessOwnerId } },
+          ).catch(() => {});
+        }
+      }
+    }
 
     const userFilter = { role: "party", ownerId: uid, businessOwnerId: String(bid) };
     const usersToDisable = await User.find(userFilter).select("_id").lean();
@@ -359,6 +441,8 @@ router.delete("/:id/permanent", async (req, res) => {
     const { invalidateAuthUserCache } = require("../middleware/auth");
     for (const u of usersToDisable) {
       invalidateAuthUserCache(u._id);
+      emitOrgChange(req, "users", { targetUserId: String(u._id) });
+      disconnectUserSockets(req.io, u._id);
     }
 
     await BusinessOwner.findByIdAndDelete(bid);

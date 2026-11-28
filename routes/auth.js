@@ -1,10 +1,11 @@
 const crypto = require("crypto");
 const express = require("express");
+const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Otp = require("../models/Otp");
 const authenticate = require("../middleware/auth");
-const { invalidateAuthUserCache } = authenticate;
+const { invalidateAuthUserCache, isOwnerAdminApproved } = authenticate;
 const {
   getMailConfigError,
   sendPasswordResetEmail,
@@ -432,6 +433,11 @@ router.post("/login", authLimiter, async (req, res) => {
     if (user.status !== "approved") {
       return notApprovedResponse(res, user);
     }
+    if (user.role === "party" && !(await isOwnerAdminApproved(user))) {
+      return res.status(403).json({
+        message: "Your organization administrator account is disabled or no longer active",
+      });
+    }
 
     if (user.role !== "super_admin" && !deviceId) {
       return res.status(400).json({
@@ -492,6 +498,11 @@ router.post("/login/verify-otp", otpLimiter, async (req, res) => {
     if (!otpId || !code) {
       return res.status(400).json({ message: "Verification code is required" });
     }
+    if (!mongoose.Types.ObjectId.isValid(otpId)) {
+      return res.status(400).json({
+        message: "This code is invalid or has expired. Request a new one.",
+      });
+    }
 
     const otp = await Otp.findById(otpId).select("+codeHash");
     if (!otp || otp.purpose !== "login_device") {
@@ -529,6 +540,11 @@ router.post("/login/verify-otp", otpLimiter, async (req, res) => {
     if (user.status !== "approved") {
       return notApprovedResponse(res, user);
     }
+    if (user.role === "party" && !(await isOwnerAdminApproved(user))) {
+      return res.status(403).json({
+        message: "Your organization administrator account is disabled or no longer active",
+      });
+    }
 
     return respondWithToken(res, 200, user, {
       deviceId: deviceId || otp.deviceId,
@@ -547,6 +563,12 @@ router.post("/login/resend-otp", otpLimiter, async (req, res) => {
     const otpId = String(req.body.otpId || "").trim();
     const channel = req.body.channel;
 
+    if (!otpId || !mongoose.Types.ObjectId.isValid(otpId)) {
+      return res
+        .status(400)
+        .json({ message: "Could not resend the code. Please sign in again." });
+    }
+
     const prev = await Otp.findById(otpId);
     if (!prev || prev.purpose !== "login_device" || prev.consumed) {
       return res
@@ -560,6 +582,11 @@ router.post("/login/resend-otp", otpLimiter, async (req, res) => {
     }
     if (user.status !== "approved") {
       return notApprovedResponse(res, user);
+    }
+    if (user.role === "party" && !(await isOwnerAdminApproved(user))) {
+      return res.status(403).json({
+        message: "Your organization administrator account is disabled or no longer active",
+      });
     }
 
     const claimedPrev = await Otp.findOneAndUpdate(
@@ -695,6 +722,11 @@ router.post("/password-reset/verify", otpLimiter, async (req, res) => {
     if (!otpId || !code) {
       return res.status(400).json({ message: "Verification code is required" });
     }
+    if (!mongoose.Types.ObjectId.isValid(otpId)) {
+      return res.status(400).json({
+        message: "This code is invalid or has expired. Request a new one.",
+      });
+    }
     if (!password || password.length < 8) {
       return res
         .status(400)
@@ -822,6 +854,13 @@ router.post("/account/upgrade", authenticate, otpLimiter, async (req, res) => {
       if (hasSuperAdmin) {
         user.role = "admin";
         user.status = "pending";
+        user.ownerId = null;
+        user.approvedBy = null;
+        user.approvedAt = null;
+        user.rejectedAt = null;
+        user.disabledAt = null;
+        user.disabledReason = "";
+        user.businessOwnerId = "";
         await user.save({ validateBeforeSave: false });
         invalidateAuthUserCache(user._id);
         return res.json({
@@ -836,6 +875,10 @@ router.post("/account/upgrade", authenticate, otpLimiter, async (req, res) => {
       user.ownerId = user._id;
       user.approvedBy = user._id;
       user.approvedAt = new Date();
+      user.rejectedAt = null;
+      user.disabledAt = null;
+      user.disabledReason = "";
+      user.pendingForAdminId = null;
       await user.save({ validateBeforeSave: false });
       invalidateAuthUserCache(user._id);
       return respondWithToken(res, 200, user, {
@@ -872,6 +915,13 @@ router.post("/account/upgrade", authenticate, otpLimiter, async (req, res) => {
 
     user.role = "party";
     user.status = "pending";
+    user.ownerId = null;
+    user.approvedBy = null;
+    user.approvedAt = null;
+    user.rejectedAt = null;
+    user.disabledAt = null;
+    user.disabledReason = "";
+    user.businessOwnerId = "";
     user.pendingForAdminId = targetAdmin._id;
     if (req.body.partyName) user.partyName = String(req.body.partyName).trim();
     if (req.body.partyId) user.partyId = String(req.body.partyId).trim();

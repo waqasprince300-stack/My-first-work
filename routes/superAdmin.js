@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const { invalidateAuthUserCache } = require("../middleware/auth");
 const BusinessOwner = require("../models/BusinessOwner");
 const GhausiaLot = require("../models/GhausiaLot");
@@ -224,6 +225,13 @@ router.patch("/admins/:id/disable", async (req, res) => {
         .json({ message: "Administrator is already disabled" });
     }
     await applyUserDisable(user, req.body?.reason);
+    const orgPartyUsers = await User.find({ role: "party", ownerId: user._id })
+      .select("_id")
+      .lean();
+    for (const pu of orgPartyUsers) {
+      invalidateAuthUserCache(pu._id);
+      disconnectUserSockets(req.io, pu._id);
+    }
     disconnectUserSockets(req.io, user._id);
     await user.populate("approvedBy", "name email");
     const [enriched] = await attachOrganizationStats([user.toJSON()]);
@@ -344,9 +352,9 @@ router.patch("/party-users/:id/disable", async (req, res) => {
         .json({ message: "Party user account is already disabled" });
     }
     await applyUserDisable(user, req.body?.reason);
-    disconnectUserSockets(req.io, user._id);
     await user.populate("ownerId pendingForAdminId approvedBy", "name email");
     emitOrgChange(req, "users", { targetUserId: String(user._id) });
+    disconnectUserSockets(req.io, user._id);
     res.json(user.toJSON());
   } catch (error) {
     res
@@ -369,6 +377,27 @@ router.patch("/party-users/:id/enable", async (req, res) => {
         message:
           "Cannot enable a party user without an assigned organization admin",
       });
+    }
+    const cleanPartyId = String(user.partyId || "").trim();
+    const cleanPartyName = String(user.partyName || "").trim();
+    if (!cleanPartyId || cleanPartyName === "Unknown (deleted)") {
+      return res.status(400).json({
+        message:
+          "Cannot enable a party user whose assigned party has been deleted",
+      });
+    }
+    if (mongoose.Types.ObjectId.isValid(cleanPartyId)) {
+      const partyExists = await Party.exists({
+        _id: cleanPartyId,
+        userId: user.ownerId,
+        deletedAt: null,
+      });
+      if (!partyExists) {
+        return res.status(400).json({
+          message:
+            "Cannot enable a party user whose assigned party is deleted or in trash",
+        });
+      }
     }
     user.status = "approved";
     user.disabledAt = null;
@@ -394,8 +423,8 @@ router.delete("/party-users/:id", async (req, res) => {
     const user = await findPartyUserOr404(req.params.id, res);
     if (!user) return;
     const result = await deletePartyUserLoginOnly(user);
-    disconnectUserSockets(req.io, user._id);
     emitOrgChange(req, "users", { targetUserId: String(user._id) });
+    disconnectUserSockets(req.io, user._id);
     res.json(result);
   } catch (error) {
     res

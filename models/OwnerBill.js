@@ -1,5 +1,49 @@
 const mongoose = require("mongoose");
 
+const billLotItemSchema = new mongoose.Schema(
+  {
+    lotId: { type: String, default: "" },
+    lotNo: { type: String, default: "" },
+    designNo: { type: String, default: "" },
+    suitComponent: { type: String, default: "main" },
+    isRework: { type: Boolean, default: false },
+    quantity: { type: Number, default: 0 },
+    rate: { type: Number, default: 0 },
+    amount: { type: Number, default: 0 },
+    preBillRate: { type: Number, default: null },
+    preBillAmount: { type: Number, default: null },
+    note: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const unpaidPreviousBillSchema = new mongoose.Schema(
+  {
+    billNo: { type: String, default: "" },
+    amount: { type: Number, default: 0 },
+    note: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const billPaymentReceivedSchema = new mongoose.Schema(
+  {
+    paymentId: { type: String, default: "" },
+    date: { type: String, default: "" },
+    amount: { type: Number, default: 0 },
+    note: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const billDeductionSchema = new mongoose.Schema(
+  {
+    title: { type: String, default: "" },
+    amount: { type: Number, default: 0 },
+  },
+  { _id: false },
+);
+
 const ownerBillSchema = new mongoose.Schema(
   {
     userId: {
@@ -33,33 +77,13 @@ const ownerBillSchema = new mongoose.Schema(
       default: "",
     },
     // Array of lot items included in this bill
-    lots: [
-      {
-        lotId: { type: String, default: "" },
-        lotNo: { type: String, default: "" },
-        designNo: { type: String, default: "" },
-        suitComponent: { type: String, default: "main" },
-        isRework: { type: Boolean, default: false },
-        quantity: { type: Number, default: 0 },
-        rate: { type: Number, default: 0 },
-        amount: { type: Number, default: 0 },
-        preBillRate: { type: Number, default: null },
-        preBillAmount: { type: Number, default: null },
-        note: { type: String, default: "" },
-      },
-    ],
+    lots: [billLotItemSchema],
     currentBillTotal: {
       type: Number,
       default: 0,
     },
     // Unsettled previous bills included (e.g. Bill #71 = ₨1,642,416)
-    unpaidPreviousBills: [
-      {
-        billNo: { type: String, default: "" },
-        amount: { type: Number, default: 0 },
-        note: { type: String, default: "" },
-      },
-    ],
+    unpaidPreviousBills: [unpaidPreviousBillSchema],
     unpaidPreviousBillsTotal: {
       type: Number,
       default: 0,
@@ -74,14 +98,7 @@ const ownerBillSchema = new mongoose.Schema(
       default: 0,
     },
     // Online or cash payments received
-    paymentsReceived: [
-      {
-        paymentId: { type: String, default: "" },
-        date: { type: String, default: "" },
-        amount: { type: Number, default: 0 },
-        note: { type: String, default: "" },
-      },
-    ],
+    paymentsReceived: [billPaymentReceivedSchema],
     totalPaymentsReceived: {
       type: Number,
       default: 0,
@@ -91,12 +108,7 @@ const ownerBillSchema = new mongoose.Schema(
       default: 0,
     },
     // Deductions / Katotiyan (Dhaga, Kapra cut, Discount, etc.)
-    deductions: [
-      {
-        title: { type: String, default: "" },
-        amount: { type: Number, default: 0 },
-      },
-    ],
+    deductions: [billDeductionSchema],
     totalDeductions: {
       type: Number,
       default: 0,

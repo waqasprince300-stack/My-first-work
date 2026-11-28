@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const router = express.Router();
 const Payment = require("../models/Payment");
 const Party = require("../models/Party");
@@ -39,7 +40,9 @@ const withReceiptFlag = (data) => {
     
     if (data.hasReceipt) {
       if (!receiptStr.startsWith("data:image/") && !receiptStr.startsWith("data:application/pdf")) {
-        throw new Error("Invalid receipt format. Must be an image or PDF data URI.");
+        const err = new Error("Invalid receipt format. Must be an image or PDF data URI.");
+        err.statusCode = 400;
+        throw err;
       }
     }
   }
@@ -89,7 +92,12 @@ router.get("/", async (req, res) => {
     if (typeQ) filter.type = typeQ;
 
     const bizOwnerQ = String(req.query.businessOwnerId || "").trim();
-    if (bizOwnerQ) filter.businessOwnerId = bizOwnerQ;
+    if (bizOwnerQ) {
+      if (!mongoose.Types.ObjectId.isValid(bizOwnerQ)) {
+        return res.status(400).json({ message: "Invalid businessOwnerId" });
+      }
+      filter.businessOwnerId = bizOwnerQ;
+    }
 
     const partyKind = String(req.query.partyKind || "")
       .trim()
@@ -240,8 +248,14 @@ router.post("/", async (req, res) => {
       });
     }
   } catch (error) {
+    const status =
+      error?.statusCode === 400 ||
+      error?.name === "ValidationError" ||
+      error?.name === "CastError"
+        ? 400
+        : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error creating payment", error: error.message });
   }
 });
@@ -279,8 +293,14 @@ router.patch("/:id", async (req, res) => {
     });
     void notifyPaymentUpdated({ payment: paymentObj, ownerId: userId });
   } catch (error) {
+    const status =
+      error?.statusCode === 400 ||
+      error?.name === "ValidationError" ||
+      error?.name === "CastError"
+        ? 400
+        : 500;
     res
-      .status(400)
+      .status(status)
       .json({ message: "Error updating payment", error: error.message });
   }
 });

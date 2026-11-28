@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const { invalidateAuthUserCache } = require("../middleware/auth");
 const User = require("../models/User");
 const Party = require("../models/Party");
@@ -17,20 +18,10 @@ router.param("id", validateObjectIdParam);
 const normalizeUser = (user) => user.toJSON();
 
 
-const findAdminParty = async (adminId, partyId, businessOwnerId) => {
-  if (!partyId) return null;
-  const party = await Party.findOne({ _id: partyId, userId: adminId, deletedAt: null });
-  if (!party) return null;
-  const partyBiz =
-    party.businessOwnerId != null ? String(party.businessOwnerId) : "";
-  const reqBiz =
-    businessOwnerId != null && String(businessOwnerId).trim() !== ""
-      ? String(businessOwnerId).trim()
-      : "";
-  if (partyBiz && reqBiz && partyBiz !== reqBiz) {
-    return null;
-  }
-  return party;
+const findAdminParty = async (adminId, partyId) => {
+  const cleanId = partyId ? String(partyId).trim() : "";
+  if (!cleanId || !mongoose.Types.ObjectId.isValid(cleanId)) return null;
+  return Party.findOne({ _id: cleanId, userId: adminId, deletedAt: null });
 };
 
 router.get("/", async (req, res) => {
@@ -167,7 +158,6 @@ router.patch(
       const linkedParty = await findAdminParty(
         req.user._id,
         partyId || user.partyId,
-        req.businessOwnerId,
       );
       if (!linkedParty) {
         return res
@@ -181,14 +171,21 @@ router.patch(
       user.partyId = String(linkedParty._id);
       user.partyName = linkedParty.name;
       user.businessOwnerId =
-        req.businessOwnerId != null ? String(req.businessOwnerId) : "";
+        linkedParty.businessOwnerId != null &&
+        String(linkedParty.businessOwnerId).trim() !== ""
+          ? String(linkedParty.businessOwnerId)
+          : req.businessOwnerId != null
+            ? String(req.businessOwnerId)
+            : "";
       user.pendingForAdminId = null;
       user.approvedBy = req.user._id;
       user.approvedAt = new Date();
       user.rejectedAt = null;
       user.disabledAt = null;
+      user.disabledReason = "";
       await user.save({ validateBeforeSave: false });
       invalidateAuthUserCache(user._id);
+      emitOrgChange(req, "users", { targetUserId: String(user._id) });
 
       res.json(normalizeUser(user));
     } catch (error) {
@@ -234,8 +231,10 @@ router.patch("/:id/reject", async (req, res) => {
     user.status = "rejected";
     user.rejectedAt = new Date();
     user.disabledAt = null;
+    user.disabledReason = "";
     await user.save({ validateBeforeSave: false });
     invalidateAuthUserCache(user._id);
+    emitOrgChange(req, "users", { targetUserId: String(user._id) });
     disconnectUserSockets(req.io, user._id);
 
     res.json(normalizeUser(user));
@@ -280,8 +279,10 @@ router.patch("/:id/disable", async (req, res) => {
 
     user.status = "disabled";
     user.disabledAt = new Date();
+    user.disabledReason = "admin_disabled";
     await user.save({ validateBeforeSave: false });
     invalidateAuthUserCache(user._id);
+    emitOrgChange(req, "users", { targetUserId: String(user._id) });
     disconnectUserSockets(req.io, user._id);
 
     res.json(normalizeUser(user));
@@ -331,9 +332,11 @@ router.patch("/:id/enable", async (req, res) => {
 
     user.status = "approved";
     user.disabledAt = null;
+    user.disabledReason = "";
     user.rejectedAt = null;
     await user.save({ validateBeforeSave: false });
     invalidateAuthUserCache(user._id);
+    emitOrgChange(req, "users", { targetUserId: String(user._id) });
 
     res.json(normalizeUser(user));
   } catch (error) {
@@ -390,7 +393,6 @@ router.patch(
       const linkedParty = await findAdminParty(
         req.user._id,
         partyId,
-        req.businessOwnerId,
       );
       if (!linkedParty) {
         return res
@@ -398,6 +400,8 @@ router.patch(
           .json({ message: "Select a valid party for this user" });
       }
 
+      const prevPartyId = String(user.partyId || "");
+      const prevBizId = String(user.businessOwnerId || "");
       user.partyId = String(linkedParty._id);
       user.partyName = linkedParty.name;
       user.businessOwnerId =
@@ -409,6 +413,14 @@ router.patch(
             : user.businessOwnerId;
       await user.save({ validateBeforeSave: false });
       invalidateAuthUserCache(user._id);
+      require("../utils/requestCache").clearCache("bootstrap");
+      emitOrgChange(req, "users", { targetUserId: String(user._id) });
+      if (
+        prevPartyId !== user.partyId ||
+        prevBizId !== String(user.businessOwnerId || "")
+      ) {
+        disconnectUserSockets(req.io, user._id);
+      }
 
       res.json(normalizeUser(user));
     } catch (error) {
@@ -445,8 +457,8 @@ router.delete("/:id", async (req, res) => {
     }
 
     const result = await deletePartyUserLoginOnly(user);
-    disconnectUserSockets(req.io, user._id);
     emitOrgChange(req, "users", { targetUserId: String(user._id) });
+    disconnectUserSockets(req.io, user._id);
     res.json(result);
   } catch (error) {
     res
